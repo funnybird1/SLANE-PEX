@@ -114,6 +114,12 @@ paused = False
 result_text = ""
 result_timer = 0
 
+show_controls = False
+prev_plane_speed = 0
+sonic_booms = []
+vortex_points = []
+last_vortex_pos = [None, None]
+
 # endregion
 
 # region WARNING SYSTEMS
@@ -152,10 +158,12 @@ detent_target = 0
 
 plane_angle = 0
 
+applied_turn = 0
+
 turn_speed = 0.0225
 
 camera_zoom = 1.0
-MIN_ZOOM = 0.35
+MIN_ZOOM = 0.17
 MAX_ZOOM = 3.2
 ZOOM_STEP = 1.20 #1.08
 GRASS_SPAWN_MIN_X = -12000
@@ -163,7 +171,7 @@ GRASS_SPAWN_MAX_X = 12000
 GRASS_SPAWN_MIN_Y = -12000
 GRASS_SPAWN_MAX_Y = 12000
 
-heat_offset = -30
+heat_offset = -52
 
 # endregion
 
@@ -182,9 +190,7 @@ heli_velocity_y = 0
 # IMAGES
 # =========================================================
 
-PLANE_IMAGE_PATH = resource_path(
-    "plane.png"
-)
+PLANE_IMAGE_PATH = resource_path("hornet.png")
 
 HELI_IMAGE_PATH = resource_path(
     "helicopter.png"
@@ -194,14 +200,14 @@ plane_image = None
 heli_image = None
 
 if os.path.exists(PLANE_IMAGE_PATH):
-
     plane_image = pygame.image.load(
         PLANE_IMAGE_PATH
     ).convert_alpha()
-
+    # hornet.png is vertical (nose up), rotate -90 to face East/Right
+    plane_image = pygame.transform.rotate(plane_image, -90)
     plane_image = pygame.transform.scale(
         plane_image,
-        (60, 60)
+        (120, 90)
     )
 
 if os.path.exists(HELI_IMAGE_PATH):
@@ -405,7 +411,7 @@ class RoadManager:
         if math.hypot(player_x - self.last_x, player_y - self.last_y) < self.chunk_length * 0.45:
             self.spawn_chunk()
 
-        far_distance = max(40000, 120000 * (1.0 / max(camera_zoom, 0.35)))
+        far_distance = max(40000, 120000 * (1.0 / max(camera_zoom, 0.17)))
 
         self.chunks = [
             chunk for chunk in self.chunks
@@ -525,6 +531,7 @@ def reset_plane():
     global plane_throttle
     global detent_timer
     global detent_target
+    global last_vortex_pos
 
     global plane_angle
 
@@ -543,6 +550,7 @@ def reset_plane():
 
     heli_velocity_x = 0
     heli_velocity_y = 0
+    last_vortex_pos = [None, None]
 
     road_manager = RoadManager(plane_x, plane_y)
 
@@ -561,13 +569,35 @@ def world_to_screen(x, y):
 # endregion
 
 # region DRAWING
-def draw_plane(x, y, angle):
+def draw_plane(x, y, angle, turn_rate=0):
 
     global aircraft_type
 
     sx, sy = world_to_screen(x, y)
 
     if aircraft_type == "JET":
+
+        # Afterburner Flames
+        if plane_throttle >= 80:
+            # Calculate intensity: 0.0 at 80% throttle to 1.0 at 100%
+            intensity = (plane_throttle - 80) / 20.0
+            # Start very short at 80% and scale up with throttle
+            flame_len = (2.0 + intensity * 45) * camera_zoom * random.uniform(0.85, 1.15)
+            
+            # Physical offsets relative to the plane's center
+            tail_offset = 47 * camera_zoom
+            side_offset = 3 * camera_zoom
+            perp_angle = angle + math.pi / 2
+            
+            for side in [-1, 1]:
+                # Starting point at the engine exhaust
+                ex = sx - math.cos(angle) * tail_offset + math.cos(perp_angle) * (side * side_offset)
+                ey = sy - math.sin(angle) * tail_offset + math.sin(perp_angle) * (side * side_offset)
+                # End point at the tip of the flame
+                fx = ex - math.cos(angle) * flame_len
+                fy = ey - math.sin(angle) * flame_len
+                
+                pygame.draw.line(screen, ORANGE, (ex, ey), (fx, fy), max(1, int(4 * camera_zoom)))
 
         if plane_image is not None:
 
@@ -793,7 +823,7 @@ def draw_environment():
             )
         )
 
-    grass_scale = max(0.35, camera_zoom)
+    grass_scale = max(0.17, camera_zoom)
 
     for blade in grass_blades:
 
@@ -843,6 +873,17 @@ def draw_environment():
 
     if road_manager is not None:
         road_manager.draw()
+
+    # Draw Runway
+    # Positioned so the player spawn (WIDTH/2, HEIGHT/2) is at the start
+    # We start the rectangle 200 units behind the player for visual buffer
+    rsx, rsy = world_to_screen(WIDTH * 0.5 - 200, HEIGHT * 0.5 - 100)
+    r_width = int(2000 * camera_zoom)
+    r_height = int(200 * camera_zoom)
+    
+    # Draw the runway (Black Rectangle)
+    if rsx < WIDTH and rsx + r_width > 0:
+        pygame.draw.rect(screen, (15, 15, 15), (rsx, rsy, r_width, r_height))
 
     for hill in mountains:
 
@@ -1298,15 +1339,47 @@ while running:
                 camera_zoom = min(MAX_ZOOM, round(camera_zoom * ZOOM_STEP, 2))
 
             if event.key == pygame.K_h:
+                show_controls = not show_controls
 
-                if aircraft_type == "JET":
-                    aircraft_type = "HELICOPTER"
-                else:
-                    aircraft_type = "JET"
 
     keys = pygame.key.get_pressed()
 
     if not paused:
+
+        # =================================================
+        # SONIC BOOM DETECTION
+        # =================================================
+        if aircraft_type == "JET":
+            current_knots = plane_speed * (1300 / 19.5)
+            prev_knots = prev_plane_speed * (1300 / 19.5)
+            if prev_knots < 1234 and current_knots >= 1234:
+                sonic_booms.append({
+                    "x": plane_x,
+                    "y": plane_y,
+                    "angle": plane_angle,
+                    "life": 25
+                })
+            prev_plane_speed = plane_speed
+
+            # Wingtip Vortex Generation (Only above 400 knots and during turns)
+            if current_knots > 400 and abs(applied_turn) > 0.006:
+                side_off = 39
+                back_off = 10
+                perp = plane_angle + math.pi/2
+                for i, side in enumerate([-1, 1]):
+                    wx = plane_x - math.cos(plane_angle) * back_off + math.cos(perp) * (side * side_off)
+                    wy = plane_y - math.sin(plane_angle) * back_off + math.sin(perp) * (side * side_off)
+                    
+                    if last_vortex_pos[i] is not None:
+                        vortex_points.append({
+                            "x1": wx, "y1": wy,
+                            "x2": last_vortex_pos[i][0], "y2": last_vortex_pos[i][1],
+                            "life": 20
+                        })
+                    last_vortex_pos[i] = (wx, wy)
+            else:
+                last_vortex_pos = [None, None]
+
 
         # =================================================
         # FIRE GUN 
@@ -1677,8 +1750,7 @@ while running:
                 while angle_diff < -math.pi:
                     angle_diff += math.pi * 2
 
-                # Reduce internal detection angle by 2 degrees to perfectly align with visual cone edges
-                player_in_cone = abs(angle_diff) <= math.radians((RADAR_CONE_ANGLE_DEGREES - 2) / 2)
+                player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
                 
                 # Only track player if within cone and range
                 if player_in_cone and distance_to_plane < RADAR_CONE_RANGE:
@@ -1699,7 +1771,7 @@ while running:
                         while angle_diff_chaff > math.pi: angle_diff_chaff -= math.pi * 2
                         while angle_diff_chaff < -math.pi: angle_diff_chaff += math.pi * 2
 
-                        if abs(angle_diff_chaff) <= math.radians((RADAR_CONE_ANGLE_DEGREES - 2) / 2):
+                        if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
                             probability = (
                                 missile["chaff_bias"]
                                 * (
@@ -1878,9 +1950,9 @@ while running:
                     countermeasure_hit = True
 
                 if not countermeasure_hit:
-                    # Scale lethal radius with zoom to maintain visual screen-space consistency
-                    # This ensures the danger zone is always ~45 pixels on screen
-                    lethal_radius = 45 / camera_zoom
+                    # Use a fixed world-space radius (45 units) for the proximity fuse.
+                    # This prevents the kill zone from expanding to unfair sizes when zooming out.
+                    lethal_radius = 45
                     dist_to_player = math.hypot(missile["x"] - plane_x, missile["y"] - plane_y)
 
                     if dist_to_player < lethal_radius:
@@ -1970,6 +2042,21 @@ while running:
                 bullets.remove(bullet)
 
         # =================================================
+        # SONIC BOOMS
+        # =================================================
+        for sb in sonic_booms:
+            sb["life"] -= 1
+            # Attach the boom effect to the plane's current coordinates
+            sb["x"] = plane_x
+            sb["y"] = plane_y
+            sb["angle"] = plane_angle
+        sonic_booms = [sb for sb in sonic_booms if sb["life"] > 0]
+
+        for vp in vortex_points:
+            vp["life"] -= 1
+        vortex_points = [vp for vp in vortex_points if vp["life"] > 0]
+
+        # =================================================
         # EXPLOSIONS
         # =================================================
 
@@ -2056,6 +2143,49 @@ while running:
             (sx, sy),
             max(1, int(smoke["radius"] * effect_scale))
         )
+
+    # =====================================================
+    # DRAW VORTICES
+    # =====================================================
+    if vortex_points:
+        vortex_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        for vp in vortex_points:
+            alpha = int((vp["life"] / 20) * 110)
+            p1 = world_to_screen(vp["x1"], vp["y1"])
+            p2 = world_to_screen(vp["x2"], vp["y2"])
+            pygame.draw.line(vortex_surf, (220, 220, 220, alpha), p1, p2, max(1, int(2 * camera_zoom)))
+        screen.blit(vortex_surf, (0, 0))
+
+    # =====================================================
+    # DRAW SONIC BOOMS
+    # =====================================================
+    for sb in sonic_booms:
+        alpha = int((sb["life"] / 25) * 120)
+        cone_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        
+        # World space dimensions for the vapor cone
+        dist_back = 10 # Moved closer to middle (was 47)
+        spread = 60    # Width of the cone base
+        length = 40    # Depth of the cone
+        
+        # Vertex of the cone (at the tail)
+        tail_x = sb["x"] - math.cos(sb["angle"]) * dist_back
+        tail_y = sb["y"] - math.sin(sb["angle"]) * dist_back
+        
+        # Base center point
+        bc_x = tail_x - math.cos(sb["angle"]) * length
+        bc_y = tail_y - math.sin(sb["angle"]) * length
+        
+        # Base edge points perpendicular to flight path
+        perp = sb["angle"] + math.pi/2
+        p1_x = bc_x - math.cos(perp) * spread
+        p1_y = bc_y - math.sin(perp) * spread
+        p2_x = bc_x + math.cos(perp) * spread
+        p2_y = bc_y + math.sin(perp) * spread
+        
+        pts = [world_to_screen(tail_x, tail_y), world_to_screen(p1_x, p1_y), world_to_screen(p2_x, p2_y)]
+        pygame.draw.polygon(cone_surf, (200, 200, 200, alpha), pts)
+        screen.blit(cone_surf, (0, 0))
 
     for explosion in explosions:
 
@@ -2201,11 +2331,8 @@ while running:
     # DRAW AIRCRAFT + MISSILES
     # =====================================================
 
-    draw_plane(
-        plane_x,
-        plane_y,
-        plane_angle
-    )
+    jet_turn = applied_turn if aircraft_type == "JET" else 0
+    draw_plane(plane_x, plane_y, plane_angle, jet_turn if not paused else 0)
 
     # Speed UI underneath player (numbers only)
     speed_sx, speed_sy = world_to_screen(plane_x, plane_y)
@@ -2233,19 +2360,21 @@ while running:
             # Missile's position in screen coordinates
             msx, msy = world_to_screen(missile["x"], missile["y"])
 
-            # Points for the cone extending from the missile
-            p1x = missile["x"] + math.cos(missile["angle"] - cone_angle_rad) * RADAR_CONE_RANGE
-            p1y = missile["y"] + math.sin(missile["angle"] - cone_angle_rad) * RADAR_CONE_RANGE
-            p2x = missile["x"] + math.cos(missile["angle"] + cone_angle_rad) * RADAR_CONE_RANGE
-            p2y = missile["y"] + math.sin(missile["angle"] + cone_angle_rad) * RADAR_CONE_RANGE
-
-            sp1x, sp1y = world_to_screen(p1x, p1y)
-            sp2x, sp2y = world_to_screen(p2x, p2y)
+            # Create a curved arc (sector) using multiple points to match the seeker's circular detection range
+            points = [(msx, msy)]
+            segments = 12
+            for i in range(segments + 1):
+                # Interpolate angle across the cone spread
+                step_angle = (missile["angle"] - cone_angle_rad) + (cone_angle_rad * 2 * (i / segments))
+                px = missile["x"] + math.cos(step_angle) * RADAR_CONE_RANGE
+                py = missile["y"] + math.sin(step_angle) * RADAR_CONE_RANGE
+                spx, spy = world_to_screen(px, py)
+                points.append((spx, spy))
 
             pygame.draw.polygon(
                 cone_surface,
                 LIGHT_BLUE_ALPHA,
-                [(msx, msy), (sp1x, sp1y), (sp2x, sp2y)]
+                points
             )
     screen.blit(cone_surface, (0, 0))
 
@@ -2326,59 +2455,60 @@ while running:
     # UI
     # =====================================================
 
-    controls = [
+    if show_controls:
+        controls = [
 
-        "JET:",
-        "W/S = THROTTLE",
-        "A/D = TURN",
+            "JET:",
+            "W/S = THROTTLE",
+            "A/D = TURN",
 
-        "",
+            "",
 
-        "HELI:",
-        "W/S = FORWARD/BACK",
-        "A/D = STRAFE",
-        "Q/E = ROTATE",
+            "HELI:",
+            "W/S = FORWARD/BACK",
+            "A/D = STRAFE",
+            "Q/E = ROTATE",
 
-        "",
+            "",
 
-        "SHIFT = FLARES",
-        "CTRL = CHAFF",
-        "C = SMOKE",
-        "F = FIRE GUN",
+            "SHIFT = FLARES",
+            "CTRL = CHAFF",
+            "C = SMOKE",
+            "F = FIRE GUN",
 
-        "",
+            "",
 
-        "1 = IR MISSILE",
-        "2 = RADAR MISSILE",
-        "3 = OPTICAL MISSILE",
+            "1 = IR MISSILE",
+            "2 = RADAR MISSILE",
+            "3 = OPTICAL MISSILE",
 
-        "",
+            "",
 
-        "Z = TOGGLE 40MM BOFORS",
-        "H = SWITCH AIRCRAFT",
+            "Z = TOGGLE 40MM BOFORS",
+            "H = TOGGLE UI",
 
-        "",
+            "",
 
-        f"AIRCRAFT: {aircraft_type}",
-        f"ACTIVE MISSILES: {len(missiles)}"
-    ]
+            f"AIRCRAFT: {aircraft_type}",
+            f"ACTIVE MISSILES: {len(missiles)}"
+        ]
 
-    y = 20
+        y = 20
 
-    for text in controls:
+        for text in controls:
 
-        render = font.render(
-            text,
-            True,
-            WHITE
-        )
+            render = font.render(
+                text,
+                True,
+                WHITE
+            )
 
-        screen.blit(
-            render,
-            (20, y)
-        )
+            screen.blit(
+                render,
+                (20, y)
+            )
 
-        y += 24
+            y += 24
 
     throttle_pct = int(plane_throttle)
 
