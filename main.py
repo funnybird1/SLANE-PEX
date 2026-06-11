@@ -35,6 +35,7 @@ pygame.display.set_caption(
 )
 
 clock = pygame.time.Clock()
+fx_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
 # endregion
 
@@ -372,70 +373,62 @@ class RoadManager:
 
         self.chunk_length = 480
         self.chunk_width = 90
-        self.max_chunks = 240
         self.chunks = []
 
         self.last_x = start_x
         self.last_y = start_y
-        self.heading = random.uniform(-0.10, 0.10)
+        self.heading = random.uniform(0, math.pi * 2)
 
-        for _ in range(6):
+        # Generate a long road once at the start
+        for _ in range(160):
             self.spawn_chunk()
 
     def spawn_chunk(self):
 
-        end_x = self.last_x + math.cos(self.heading) * self.chunk_length
-        end_y = self.last_y + math.sin(self.heading) * self.chunk_length
+        # Proactively steer toward the map center if approaching boundaries to create natural curves
+        margin = 3500
+        if (self.last_x < GRASS_SPAWN_MIN_X + margin or self.last_x > GRASS_SPAWN_MAX_X - margin or
+            self.last_y < GRASS_SPAWN_MIN_Y + margin or self.last_y > GRASS_SPAWN_MAX_Y - margin):
+            
+            target_center = math.atan2(-self.last_y, -self.last_x)
+            # Calculate the shortest angular difference to rotate toward center
+            diff = (target_center - self.heading + math.pi) % (math.pi * 2) - math.pi
+            self.heading += diff * 0.22 # Smoothly steer 22% of the way toward center per chunk
+
+        # Standard random meandering
+        self.heading += random.uniform(-0.12, 0.12)
+
+        next_x = self.last_x + math.cos(self.heading) * self.chunk_length
+        next_y = self.last_y + math.sin(self.heading) * self.chunk_length
 
         self.chunks.append({
             "x1": self.last_x,
             "y1": self.last_y,
-            "x2": end_x,
-            "y2": end_y,
+            "x2": next_x,
+            "y2": next_y,
             "width": self.chunk_width,
         })
 
-        self.last_x = end_x
-        self.last_y = end_y
-
-        self.heading += random.uniform(-0.08, 0.08)
-
-        if len(self.chunks) > self.max_chunks:
-            self.chunks.pop(0)
+        self.last_x = next_x
+        self.last_y = next_y
 
     def update(self, player_x, player_y):
+        # Static road layout, no dynamic updates required
+        pass
 
-        while len(self.chunks) < 80:
-            self.spawn_chunk()
-
-        if math.hypot(player_x - self.last_x, player_y - self.last_y) < self.chunk_length * 0.45:
-            self.spawn_chunk()
-
-        far_distance = max(40000, 120000 * (1.0 / max(camera_zoom, 0.17)))
-
-        self.chunks = [
-            chunk for chunk in self.chunks
-            if math.hypot(player_x - chunk["x2"], player_y - chunk["y2"]) < far_distance
-        ]
-
-    def draw(self):
+    def draw(self, v_min_x, v_max_x, v_min_y, v_max_y, ox, oy):
 
         for chunk in self.chunks:
+            # Fast World-Space Culling
+            if not (v_min_x < chunk["x1"] < v_max_x or v_min_x < chunk["x2"] < v_max_x):
+                if not (v_min_y < chunk["y1"] < v_max_y or v_min_y < chunk["y2"] < v_max_y):
+                    continue
 
-            sx1, sy1 = world_to_screen(chunk["x1"], chunk["y1"])
-            sx2, sy2 = world_to_screen(chunk["x2"], chunk["y2"])
-
-            if sx1 < -400 and sx2 < -400:
-                continue
-
-            if sx1 > WIDTH + 400 and sx2 > WIDTH + 400:
-                continue
-
-            if sy1 < -400 and sy2 < -400:
-                continue
-
-            if sy1 > HEIGHT + 400 and sy2 > HEIGHT + 400:
-                continue
+            # Inlined world_to_screen
+            sx1 = int(chunk["x1"] * camera_zoom + ox)
+            sy1 = int(chunk["y1"] * camera_zoom + oy)
+            sx2 = int(chunk["x2"] * camera_zoom + ox)
+            sy2 = int(chunk["y2"] * camera_zoom + oy)
 
             pygame.draw.line(
                 screen,
@@ -463,28 +456,23 @@ road_manager = RoadManager(plane_x, plane_y)
 def generate_mountains():
 
     global mountains
+    mountains = []
 
-    while len(mountains) < 18:
+    for _ in range(80):
 
         mountains.append({
-            "x": plane_x + random.randint(-6000, 6000),
-            "y": plane_y + random.randint(-5000, 5000),
+            "x": random.randint(GRASS_SPAWN_MIN_X, GRASS_SPAWN_MAX_X),
+            "y": random.randint(GRASS_SPAWN_MIN_Y, GRASS_SPAWN_MAX_Y),
             "size": random.randint(360, 660),
-            "color": MOUNTAIN if len(mountains) % 2 == 0 else MOUNTAIN_ALT
+            "color": MOUNTAIN if random.random() > 0.5 else MOUNTAIN_ALT
         })
-
-    mountains = [
-        hill for hill in mountains
-        if abs(hill["x"] - plane_x) < 14000
-        and abs(hill["y"] - plane_y) < 14000
-    ]
 
 
 generate_mountains()
 
 grass_blades = []
 
-for _ in range(1200):
+for _ in range(600):
 
     gx = random.randint(-12000, 12000)
     gy = random.randint(-12000, 12000)
@@ -493,6 +481,10 @@ for _ in range(1200):
     center_len = blade_len + random.randint(4, 10)
     spread = random.randint(4, 9)
     angle = random.uniform(0.08, 0.22)
+    
+    # Pre-calculate offsets to avoid trig in the main loop
+    cos_a = math.cos(angle) * 8
+    sin_a = math.sin(angle) * 6
 
     grass_blades.append({
         "x": gx,
@@ -500,7 +492,8 @@ for _ in range(1200):
         "blade_len": blade_len,
         "center_len": center_len,
         "spread": spread,
-        "angle": angle,
+        "lx_off": cos_a, "ly_off": sin_a,
+        "rx_off": cos_a, "ry_off": sin_a
     })
 
 # =========================================================
@@ -798,44 +791,45 @@ def draw_aaa():
 # endregion
 
 # region ENVIRONMENT
-def draw_environment():
+def draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, ox, oy):
 
     screen.fill(WATER)
 
-    left = max(GRASS_SPAWN_MIN_X, plane_x - WIDTH / (2 * max(camera_zoom, 0.001)))
-    right = min(GRASS_SPAWN_MAX_X, plane_x + WIDTH / (2 * max(camera_zoom, 0.001)))
-    top = max(GRASS_SPAWN_MIN_Y, plane_y - HEIGHT / (2 * max(camera_zoom, 0.001)))
-    bottom = min(GRASS_SPAWN_MAX_Y, plane_y + HEIGHT / (2 * max(camera_zoom, 0.001)))
+    left = max(GRASS_SPAWN_MIN_X, v_min_x)
+    right = min(GRASS_SPAWN_MAX_X, v_max_x)
+    top = max(GRASS_SPAWN_MIN_Y, v_min_y)
+    bottom = min(GRASS_SPAWN_MAX_Y, v_max_y)
 
     if left < right and top < bottom:
+        sx1 = int(left * camera_zoom + ox)
+        sy1 = int(top * camera_zoom + oy)
+        sx2 = int(right * camera_zoom + ox)
+        sy2 = int(bottom * camera_zoom + oy)
+        
+        rect_x = min(sx1, sx2)
+        rect_y = min(sy1, sy2)
+        rect_w = max(1, abs(sx2 - sx1))
+        rect_h = max(1, abs(sy2 - sy1))
 
-        sx1, sy1 = world_to_screen(left, top)
-        sx2, sy2 = world_to_screen(right, bottom)
+        # Optimization: only draw if within screen pixels
+        if rect_x < WIDTH and rect_x + rect_w > 0:
+            if rect_y < HEIGHT and rect_y + rect_h > 0:
+                pygame.draw.rect(screen, GRASS, (rect_x, rect_y, rect_w, rect_h))
 
-        pygame.draw.rect(
-            screen,
-            GRASS,
-            (
-                min(sx1, sx2),
-                min(sy1, sy2),
-                max(1, abs(sx2 - sx1)),
-                max(1, abs(sy2 - sy1))
-            )
-        )
+    grass_scale = camera_zoom
+    # Skip blades if zoomed very far out to save performance
+    step = 1 if camera_zoom > 0.4 else (2 if camera_zoom > 0.2 else 4)
 
-    grass_scale = max(0.17, camera_zoom)
-
-    for blade in grass_blades:
-
-        sx, sy = world_to_screen(blade["x"], blade["y"])
-
-        if sx < -80 or sx > WIDTH + 80 or sy < -80 or sy > HEIGHT + 80:
+    for blade in grass_blades[::step]:
+        if not (v_min_x < blade["x"] < v_max_x and v_min_y < blade["y"] < v_max_y):
             continue
+
+        sx = int(blade["x"] * camera_zoom + ox)
+        sy = int(blade["y"] * camera_zoom + oy)
 
         blade_len = int(blade["blade_len"] * grass_scale)
         center_len = int(blade["center_len"] * grass_scale)
         spread = max(1, int(blade["spread"] * grass_scale))
-        angle = blade["angle"]
 
         pygame.draw.line(
             screen,
@@ -847,13 +841,13 @@ def draw_environment():
 
         left_x1 = sx - spread
         left_y1 = sy + 2
-        left_x2 = sx - spread - int(math.cos(angle) * 8 * grass_scale)
-        left_y2 = sy - blade_len + int(math.sin(angle) * 6 * grass_scale)
+        left_x2 = sx - spread - int(blade["lx_off"] * grass_scale)
+        left_y2 = sy - blade_len + int(blade["ly_off"] * grass_scale)
 
         right_x1 = sx + spread
         right_y1 = sy + 2
-        right_x2 = sx + spread + int(math.cos(angle) * 8 * grass_scale)
-        right_y2 = sy - blade_len - int(math.sin(angle) * 6 * grass_scale)
+        right_x2 = sx + spread + int(blade["rx_off"] * grass_scale)
+        right_y2 = sy - blade_len - int(blade["ry_off"] * grass_scale)
 
         pygame.draw.line(
             screen,
@@ -872,25 +866,23 @@ def draw_environment():
         )
 
     if road_manager is not None:
-        road_manager.draw()
+        road_manager.draw(v_min_x, v_max_x, v_min_y, v_max_y, ox, oy)
 
     # Draw Runway
-    # Positioned so the player spawn (WIDTH/2, HEIGHT/2) is at the start
-    # We start the rectangle 200 units behind the player for visual buffer
-    rsx, rsy = world_to_screen(WIDTH * 0.5 - 200, HEIGHT * 0.5 - 100)
+    rsx = int((WIDTH * 0.5 - 200) * camera_zoom + ox)
+    rsy = int((HEIGHT * 0.5 - 100) * camera_zoom + oy)
     r_width = int(2000 * camera_zoom)
     r_height = int(200 * camera_zoom)
     
-    # Draw the runway (Black Rectangle)
     if rsx < WIDTH and rsx + r_width > 0:
         pygame.draw.rect(screen, (15, 15, 15), (rsx, rsy, r_width, r_height))
 
     for hill in mountains:
-
-        sx, sy = world_to_screen(hill["x"], hill["y"])
-
-        if sx < -300 or sx > WIDTH + 300 or sy < -300 or sy > HEIGHT + 300:
+        if not (v_min_x - 500 < hill["x"] < v_max_x + 500 and v_min_y - 500 < hill["y"] < v_max_y + 500):
             continue
+
+        sx = int(hill["x"] * camera_zoom + ox)
+        sy = int(hill["y"] * camera_zoom + oy)
 
         hill_size = hill["size"] * camera_zoom
 
@@ -1016,69 +1008,49 @@ def create_explosion(
 # SPAWN MISSILE
 # =========================================================
 
-def spawn_missile(
-    missile_type
-):
-
+def spawn_missile(missile_type):
     spawn_side = random.randint(0, 3)
-
     half_w = WIDTH * 0.5 + 40
     half_h = HEIGHT * 0.5 + 40
-
-    # Scale spawn distance by 3x
     spawn_offset_x = half_w * 3
     spawn_offset_y = half_h * 3
 
-    if spawn_side == 0:
-
-        spawn_x = plane_x + random.randint(-int(spawn_offset_x), int(spawn_offset_x))
-
-        spawn_y = plane_y - spawn_offset_y
-
-    elif spawn_side == 1:
-
-        spawn_x = plane_x + spawn_offset_x
-
-        spawn_y = plane_y + random.randint(-int(spawn_offset_y), int(spawn_offset_y))
-
-    elif spawn_side == 2:
-
-        spawn_x = plane_x + random.randint(-int(spawn_offset_x), int(spawn_offset_x))
-
-        spawn_y = plane_y + spawn_offset_y
-
+    if missile_type == "STATIONARY_RADAR":
+        spawn_x, spawn_y = aaa_position
     else:
-
-        spawn_x = plane_x - spawn_offset_x
-
-        spawn_y = plane_y + random.randint(-int(spawn_offset_y), int(spawn_offset_y))
+        if spawn_side == 0:
+            spawn_x = plane_x + random.randint(-int(spawn_offset_x), int(spawn_offset_x))
+            spawn_y = plane_y - spawn_offset_y
+        elif spawn_side == 1:
+            spawn_x = plane_x + spawn_offset_x
+            spawn_y = plane_y + random.randint(-int(spawn_offset_y), int(spawn_offset_y))
+        elif spawn_side == 2:
+            spawn_x = plane_x + random.randint(-int(spawn_offset_x), int(spawn_offset_x))
+            spawn_y = plane_y + spawn_offset_y
+        else:
+            spawn_x = plane_x - spawn_offset_x
+            spawn_y = plane_y + random.randint(-int(spawn_offset_y), int(spawn_offset_y))
 
     missiles.append({
-
         "type": missile_type,
-
         "x": spawn_x,
         "y": spawn_y,
-
         "angle": math.atan2(
             plane_y - spawn_y,
             plane_x - spawn_x
         ),
-
         "track_x": plane_x,
         "track_y": plane_y,
-
         "trail": [],
-
         "flare_bias": random.uniform(
             0.35,
             0.75
         ),
-
         "chaff_bias": random.uniform(
             0.45,
             0.85
-        )
+        ),
+        "lock_strength": 0.0
     })
 
 # =========================================================
@@ -1274,9 +1246,19 @@ while running:
 
     clock.tick(60)
 
+    # --- OPTIMIZATION: PRE-CALCULATE CAMERA CONSTANTS ---
+    inv_zoom = 1.0 / max(camera_zoom, 0.001)
+    view_w = (WIDTH * 0.5) * inv_zoom
+    view_h = (HEIGHT * 0.5) * inv_zoom
+    v_min_x, v_max_x = plane_x - view_w, plane_x + view_w
+    v_min_y, v_max_y = plane_y - view_h, plane_y + view_h
+    cam_ox = -plane_x * camera_zoom + WIDTH * 0.5
+    cam_oy = -plane_y * camera_zoom + HEIGHT * 0.5
+
+    fx_surface.fill((0, 0, 0, 0))
     screen.fill(BG)
 
-    draw_environment()
+    draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, cam_ox, cam_oy)
 
     rwr_state = "NONE"
 
@@ -1312,22 +1294,16 @@ while running:
                 deploy_smoke()
 
             if event.key == pygame.K_1:
-
-                ir_launch_sound.play()
-
-                spawn_missile("IR")
+                radar_launch_sound.play()
+                spawn_missile("STATIONARY_RADAR")
 
             if event.key == pygame.K_2:
-                
-                radar_launch_sound.play()
-
-                spawn_missile("RADAR")
+                ir_launch_sound.play()
+                spawn_missile("IR")
       
             if event.key == pygame.K_3:
-
-                optical_launch_sound.play()
-
-                spawn_missile("OPTICAL")
+                radar_launch_sound.play()
+                spawn_missile("RADAR")
 
             if event.key == pygame.K_z:
                 aaa_enabled = not aaa_enabled
@@ -1362,7 +1338,7 @@ while running:
             prev_plane_speed = plane_speed
 
             # Wingtip Vortex Generation (Only above 400 knots and during turns)
-            if current_knots > 400 and abs(applied_turn) > 0.006:
+            if 400 < current_knots < 900 and abs(applied_turn) > 0.006:
                 side_off = 39
                 back_off = 10
                 perp = plane_angle + math.pi/2
@@ -1453,6 +1429,8 @@ while running:
             drag = (plane_speed / max_speed) * 0.08
             if plane_throttle == 0 and keys[pygame.K_s]:
                 drag *= 2.0
+                if current_knots < 40:
+                    plane_speed -= 0.015 # Extra braking force to reach 0 faster
 
             turn_bleed = abs(applied_turn) * 0.375
 
@@ -1562,14 +1540,6 @@ while running:
             + math.sin(plane_angle)
             * heat_offset
         )
-
-        generate_mountains()
-
-        if mountain_refresh_timer <= 0:
-            generate_mountains()
-            mountain_refresh_timer = 10
-        else:
-            mountain_refresh_timer -= 1
 
         # =================================================
         # COUNTERMEASURES
@@ -1721,6 +1691,67 @@ while running:
                 missile_speed = IR_MISSILE_SPEED
                 turn_rate = IR_TURN_RATE
 
+            elif missile["type"] == "STATIONARY_RADAR":
+                chaff_targeted = False
+                target_x = missile["track_x"]
+                target_y = missile["track_y"]
+                source_x, source_y = aaa_position
+                
+                dist_to_plane = math.hypot(missile["x"] - plane_x, missile["y"] - plane_y)
+                if dist_to_plane > 500: rwr_state = "SEARCH"
+                elif dist_to_plane > 220: rwr_state = "TRACK"
+                else: rwr_state = "MISSILE"
+
+                # Radar cone detection from GROUND STATION
+                angle_to_player = math.atan2(plane_y - source_y, plane_x - source_x)
+                radar_angle = math.atan2(missile["track_y"] - source_y, missile["track_x"] - source_x)
+                angle_diff = angle_to_player - radar_angle
+                while angle_diff > math.pi: angle_diff -= math.pi * 2
+                while angle_diff < -math.pi: angle_diff += math.pi * 2
+
+                player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
+                dist_ground_to_plane = math.hypot(plane_x - source_x, plane_y - source_y)
+                
+                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE:
+                    if aircraft_type == "JET":
+                        pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
+                    else:
+                        pvx, pvy = heli_velocity_x, heli_velocity_y
+
+                    # Calculate Radial Velocity (Closure Rate) relative to the ground station
+                    # Flying perpendicular to the radar beam (notching) reduces this value to zero
+                    dx_p, dy_p = plane_x - source_x, plane_y - source_y
+                    radial_vel = abs((pvx * dx_p + pvy * dy_p) / dist_ground_to_plane) if dist_ground_to_plane > 0 else 0
+                    
+                    missile["lock_strength"] = min(1.0, radial_vel / 10) #notch sensitivity, lower is harder to notch
+                    target_x, target_y = plane_x, plane_y
+                else:
+                    missile["lock_strength"] = 0.0
+
+                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE:
+                    for chaff in chaff_clouds:
+                        # Radar cone check from ground source
+                        dist_ground_to_chaff = math.hypot(chaff["x"] - source_x, chaff["y"] - source_y)
+                        if dist_ground_to_chaff > RADAR_CONE_RANGE:
+                            continue
+                            
+                        angle_to_chaff = math.atan2(chaff["y"] - source_y, chaff["x"] - source_x)
+                        angle_diff_chaff = angle_to_chaff - radar_angle
+                        while angle_diff_chaff > math.pi: angle_diff_chaff -= math.pi * 2
+                        while angle_diff_chaff < -math.pi: angle_diff_chaff += math.pi * 2
+
+                        if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
+                            dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
+                            if dist_chaff_to_plane < 850:
+                                probability = missile["chaff_bias"] * ((1.0 - missile["lock_strength"])**2) * (1.0 - dist_chaff_to_plane / 850)
+                                if random.random() < probability:
+                                    target_x, target_y = chaff["x"], chaff["y"]
+                                    chaff_targeted = True
+                                    break
+
+                missile_speed = RADAR_MISSILE_SPEED
+                turn_rate = RADAR_TURN_RATE
+
             elif missile["type"] == "RADAR":
 
                 chaff_targeted = False
@@ -1754,36 +1785,46 @@ while running:
                 
                 # Only track player if within cone and range
                 if player_in_cone and distance_to_plane < RADAR_CONE_RANGE:
+                    # Calculate lock strength based on relative velocity (Closure Rate)
+                    mvx, mvy = math.cos(missile["angle"]) * RADAR_MISSILE_SPEED, math.sin(missile["angle"]) * RADAR_MISSILE_SPEED
+                    if aircraft_type == "JET":
+                        pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
+                    else:
+                        pvx, pvy = heli_velocity_x, heli_velocity_y
+                    
+                    rel_vel = math.hypot(pvx - mvx, pvy - mvy)
+                    # 25.0 is a normalization factor for max closure vs missile speed
+                    missile["lock_strength"] = min(1.0, rel_vel / 25.0)
+                    
                     target_x = plane_x
                     target_y = plane_y
+                else:
+                    missile["lock_strength"] = 0.0
 
-                for chaff in chaff_clouds:
-
-                    chaff_dist = math.hypot(
-                        missile["x"] - chaff["x"],
-                        missile["y"] - chaff["y"]
-                    )
-
-                    if chaff_dist < 260:
-                        # Seeker cone check for chaff
+                if player_in_cone and distance_to_plane < RADAR_CONE_RANGE:
+                    for chaff in chaff_clouds:
+                        # Seeker cone check for chaff (from missile's perspective)
+                        dist_missile_to_chaff = math.hypot(chaff["x"] - missile["x"], chaff["y"] - missile["y"])
+                        if dist_missile_to_chaff > RADAR_CONE_RANGE:
+                            continue
+                            
                         angle_to_chaff = math.atan2(chaff["y"] - missile["y"], chaff["x"] - missile["x"])
                         angle_diff_chaff = angle_to_chaff - missile["angle"]
                         while angle_diff_chaff > math.pi: angle_diff_chaff -= math.pi * 2
                         while angle_diff_chaff < -math.pi: angle_diff_chaff += math.pi * 2
 
                         if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
-                            probability = (
-                                missile["chaff_bias"]
-                                * (
-                                    1
-                                    - chaff_dist / 260
+                            dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
+                            if dist_chaff_to_plane < 850:
+                                probability = (
+                                    missile["chaff_bias"]
+                                    * ((1.0 - missile["lock_strength"])**2)
+                                    * (1.0 - dist_chaff_to_plane / 850)
                                 )
-                            )
-
-                            if random.random() < probability:
-                                target_x = chaff["x"]
-                                target_y = chaff["y"]
-                                chaff_targeted = True
+                                if random.random() < probability:
+                                    target_x, target_y = chaff["x"], chaff["y"]
+                                    chaff_targeted = True
+                                    break
 
                 missile_speed = RADAR_MISSILE_SPEED
                 turn_rate = RADAR_TURN_RATE
@@ -1801,9 +1842,10 @@ while running:
                 target_x = plane_x
                 target_y = plane_y
 
-                for smoke in smoke_clouds:
+                # Optimized smoke check
+                for smoke in smoke_clouds[::2]: # Check half the smoke for performance
 
-                    smoke_dist = math.hypot(
+                    smoke_dist = (
                         missile["x"] - smoke["x"],
                         missile["y"] - smoke["y"]
                     )
@@ -1820,15 +1862,17 @@ while running:
                 missile_speed = OPTICAL_MISSILE_SPEED
                 turn_rate = OPTICAL_TURN_RATE
 
+            # Radar missiles track instantly; others have sensor lag
+            track_response = 1.0 if "RADAR" in missile["type"] else 0.10
             missile["track_x"] += (
                 target_x
                 - missile["track_x"]
-            ) * 0.10
+            ) * track_response
 
             missile["track_y"] += (
                 target_y
                 - missile["track_y"]
-            ) * 0.10
+            ) * track_response
 
             dx = (
                 missile["track_x"]
@@ -1911,7 +1955,7 @@ while running:
                     countermeasure_hit = True
 
                 elif (
-                    missile["type"] == "RADAR"
+                    "RADAR" in missile["type"]
                     and chaff_targeted
                 ):
 
@@ -1950,12 +1994,11 @@ while running:
                     countermeasure_hit = True
 
                 if not countermeasure_hit:
-                    # Use a fixed world-space radius (45 units) for the proximity fuse.
-                    # This prevents the kill zone from expanding to unfair sizes when zooming out.
                     lethal_radius = 45
-                    dist_to_player = math.hypot(missile["x"] - plane_x, missile["y"] - plane_y)
-
-                    if dist_to_player < lethal_radius:
+                    dx_p = missile["x"] - plane_x
+                    dy_p = missile["y"] - plane_y
+                    # Optimized proximity check using squared distance
+                    if (dx_p*dx_p + dy_p*dy_p) < (lethal_radius * lethal_radius):
                         # Player caught in proximity fuse
                         create_explosion(missile["x"], missile["y"], RED, radius=int(lethal_radius))
                         create_explosion(plane_x, plane_y, RED, radius=10)
@@ -2078,23 +2121,21 @@ while running:
 
         trail_color = ORANGE
 
-        if missile["type"] == "RADAR":
+        if "RADAR" in missile["type"]:
             trail_color = LIGHT_BLUE
 
         if missile["type"] == "OPTICAL":
             trail_color = PURPLE
 
-        for i in range(
-            len(missile["trail"]) - 1
-        ):
-
-            pygame.draw.line(
-                screen,
-                trail_color,
-                world_to_screen(*missile["trail"][i]),
-                world_to_screen(*missile["trail"][i + 1]),
-                2
-            )
+        if len(missile["trail"]) > 1:
+            # Sub-sample trails based on zoom level to drastically reduce loop overhead
+            t_step = 1 if camera_zoom > 0.8 else (2 if camera_zoom > 0.4 else 3)
+            screen_pts = [
+                (int(p[0] * camera_zoom + cam_ox), int(p[1] * camera_zoom + cam_oy))
+                for p in missile["trail"][::t_step]
+            ]
+            if len(screen_pts) > 1:
+                pygame.draw.lines(screen, trail_color, False, screen_pts, 2)
 
     # =====================================================
     # DRAW EFFECTS
@@ -2148,20 +2189,17 @@ while running:
     # DRAW VORTICES
     # =====================================================
     if vortex_points:
-        vortex_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         for vp in vortex_points:
             alpha = int((vp["life"] / 20) * 110)
             p1 = world_to_screen(vp["x1"], vp["y1"])
             p2 = world_to_screen(vp["x2"], vp["y2"])
-            pygame.draw.line(vortex_surf, (220, 220, 220, alpha), p1, p2, max(1, int(2 * camera_zoom)))
-        screen.blit(vortex_surf, (0, 0))
+            pygame.draw.line(fx_surface, (220, 220, 220, alpha), p1, p2, max(1, int(2 * camera_zoom)))
 
     # =====================================================
     # DRAW SONIC BOOMS
     # =====================================================
     for sb in sonic_booms:
         alpha = int((sb["life"] / 25) * 120)
-        cone_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         
         # World space dimensions for the vapor cone
         dist_back = 10 # Moved closer to middle (was 47)
@@ -2184,8 +2222,7 @@ while running:
         p2_y = bc_y + math.sin(perp) * spread
         
         pts = [world_to_screen(tail_x, tail_y), world_to_screen(p1_x, p1_y), world_to_screen(p2_x, p2_y)]
-        pygame.draw.polygon(cone_surf, (200, 200, 200, alpha), pts)
-        screen.blit(cone_surf, (0, 0))
+        pygame.draw.polygon(fx_surface, (200, 200, 200, alpha), pts)
 
     for explosion in explosions:
 
@@ -2210,7 +2247,7 @@ while running:
         line_color = GREY
         dot_color = GREEN
 
-        if missile["type"] == "RADAR":
+        if "RADAR" in missile["type"]:
 
             line_color = LIGHT_BLUE
             dot_color = CYAN
@@ -2352,31 +2389,36 @@ while running:
     # =====================================================
     # DRAW RADAR MISSILE SEEKER CONES
     # =====================================================
-    cone_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     cone_angle_rad = math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
-
     for missile in missiles:
-        if missile["type"] == "RADAR":
-            # Missile's position in screen coordinates
-            msx, msy = world_to_screen(missile["x"], missile["y"])
+        if "RADAR" in missile["type"]:
+            if missile["type"] == "STATIONARY_RADAR":
+                source_x, source_y = aaa_position
+                msx, msy = world_to_screen(source_x, source_y)
+                ref_angle = math.atan2(missile["track_y"] - source_y, missile["track_x"] - source_x)
+            else:
+                msx, msy = world_to_screen(missile["x"], missile["y"])
+                ref_angle = missile["angle"]
 
-            # Create a curved arc (sector) using multiple points to match the seeker's circular detection range
             points = [(msx, msy)]
-            segments = 12
+            segments = 6
             for i in range(segments + 1):
-                # Interpolate angle across the cone spread
-                step_angle = (missile["angle"] - cone_angle_rad) + (cone_angle_rad * 2 * (i / segments))
-                px = missile["x"] + math.cos(step_angle) * RADAR_CONE_RANGE
-                py = missile["y"] + math.sin(step_angle) * RADAR_CONE_RANGE
-                spx, spy = world_to_screen(px, py)
+                step_angle = (ref_angle - cone_angle_rad) + (cone_angle_rad * 2 * (i / segments))
+                origin_x = aaa_position[0] if missile["type"] == "STATIONARY_RADAR" else missile["x"]
+                origin_y = aaa_position[1] if missile["type"] == "STATIONARY_RADAR" else missile["y"]
+                spx = int((origin_x + math.cos(step_angle) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
+                spy = int((origin_y + math.sin(step_angle) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
                 points.append((spx, spy))
 
+            ls = missile.get("lock_strength", 0)
+            dynamic_cone_color = (int(255 * ls), int(255 * (1.0 - ls)), 0, 80)
+
             pygame.draw.polygon(
-                cone_surface,
-                LIGHT_BLUE_ALPHA,
+                fx_surface,
+                dynamic_cone_color,
                 points
             )
-    screen.blit(cone_surface, (0, 0))
+    screen.blit(fx_surface, (0, 0))
 
     # =====================================================
     # WARNING SYSTEMS
@@ -2478,9 +2520,9 @@ while running:
 
             "",
 
-            "1 = IR MISSILE",
-            "2 = RADAR MISSILE",
-            "3 = OPTICAL MISSILE",
+            "1 = STATIONARY RADAR MISSILE",
+            "2 = IR MISSILE",
+            "3 = MOBILE RADAR MISSILE",
 
             "",
 
@@ -2570,6 +2612,10 @@ while running:
                 HEIGHT // 2 - 40
             )
         )
+
+    # FPS Counter (Bottom Right)
+    fps_surf = font.render(f"FPS: {int(clock.get_fps())}", True, GREEN)
+    screen.blit(fps_surf, (WIDTH - fps_surf.get_width() - 20, HEIGHT - 40))
 
     pygame.display.flip()
 
