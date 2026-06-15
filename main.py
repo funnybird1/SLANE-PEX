@@ -120,6 +120,9 @@ prev_plane_speed = 0
 sonic_booms = []
 vortex_points = []
 last_vortex_pos = [None, None]
+ground_radar_enabled = False
+ground_radar_lock = 0.0
+ground_radar_sweep = 0.0
 
 # endregion
 
@@ -282,16 +285,16 @@ rwr_missile_sound = pygame.mixer.Sound(
 
 missiles = []
 
-IR_MISSILE_SPEED = 6.5
+IR_MISSILE_SPEED = 2000 / 66.6  # Setting 2000 here results in 2000 knots
 IR_TURN_RATE = 0.09
 
 RADAR_CONE_ANGLE_DEGREES = 60
 RADAR_CONE_RANGE = 5000 # Range for visual cone and detection
 
-RADAR_MISSILE_SPEED = 9
+RADAR_MISSILE_SPEED = 1500 / 66.6 # Setting 1500 here results in 1500 knots
 RADAR_TURN_RATE = 0.055
 
-OPTICAL_MISSILE_SPEED = 3.8
+OPTICAL_MISSILE_SPEED = 380 / 66.6 # Setting 380 here results in 380 knots
 OPTICAL_TURN_RATE = 0.1
 
 # endregion
@@ -530,6 +533,9 @@ def reset_plane():
 
     global heli_velocity_x
     global heli_velocity_y
+    global ground_radar_enabled
+    global ground_radar_lock
+    global missiles
 
     plane_x = WIDTH * 0.5
     plane_y = HEIGHT * 0.5
@@ -544,6 +550,10 @@ def reset_plane():
     heli_velocity_x = 0
     heli_velocity_y = 0
     last_vortex_pos = [None, None]
+
+    ground_radar_enabled = False
+    ground_radar_lock = 0.0
+    missiles = [m for m in missiles if m["type"] != "STATIONARY_RADAR"]
 
     road_manager = RoadManager(plane_x, plane_y)
 
@@ -1050,7 +1060,9 @@ def spawn_missile(missile_type):
             0.45,
             0.85
         ),
-        "lock_strength": 0.0
+        "lock_strength": 0.0,
+        "is_decoyed": False,
+        "decoy_pos": [0, 0]
     })
 
 # =========================================================
@@ -1294,16 +1306,19 @@ while running:
                 deploy_smoke()
 
             if event.key == pygame.K_1:
-                radar_launch_sound.play()
-                spawn_missile("STATIONARY_RADAR")
+                ground_radar_enabled = not ground_radar_enabled
+                if not ground_radar_enabled:
+                    ground_radar_lock = 0.0
 
             if event.key == pygame.K_2:
-                ir_launch_sound.play()
-                spawn_missile("IR")
+                if not missiles:
+                    ir_launch_sound.play()
+                    spawn_missile("IR")
       
             if event.key == pygame.K_3:
-                radar_launch_sound.play()
-                spawn_missile("RADAR")
+                if not missiles:
+                    radar_launch_sound.play()
+                    spawn_missile("RADAR")
 
             if event.key == pygame.K_z:
                 aaa_enabled = not aaa_enabled
@@ -1323,12 +1338,33 @@ while running:
     if not paused:
 
         # =================================================
+        # GROUND RADAR LOGIC
+        # =================================================
+        if ground_radar_enabled:
+            ground_radar_sweep = math.sin(pygame.time.get_ticks() * 0.003)
+            
+            dx = plane_x - aaa_position[0]
+            dy = plane_y - aaa_position[1]
+            dist = math.hypot(dx, dy)
+            
+            if dist < RADAR_CONE_RANGE:
+                # Only build lock if no missiles are currently active
+                if not missiles and abs(ground_radar_sweep) < 0.25:
+                    ground_radar_lock = min(1.0, ground_radar_lock + 0.05)
+                
+                if ground_radar_lock >= 1.0 and not missiles:
+                    radar_launch_sound.play()
+                    spawn_missile("STATIONARY_RADAR")
+                    ground_radar_lock = 0.0
+            else:
+                ground_radar_lock = max(0.0, ground_radar_lock - 0.01)
+
+        # =================================================
         # SONIC BOOM DETECTION
         # =================================================
         if aircraft_type == "JET":
-            current_knots = plane_speed * (1300 / 19.5)
-            prev_knots = prev_plane_speed * (1300 / 19.5)
-            if prev_knots < 1234 and current_knots >= 1234:
+            # Trigger sonic boom effect when crossing Mach 1 (approx 18.5 internal units)
+            if prev_plane_speed < 18.5 and plane_speed >= 18.5:
                 sonic_booms.append({
                     "x": plane_x,
                     "y": plane_y,
@@ -1338,7 +1374,7 @@ while running:
             prev_plane_speed = plane_speed
 
             # Wingtip Vortex Generation (Only above 400 knots and during turns)
-            if 400 < current_knots < 900 and abs(applied_turn) > 0.006:
+            if 6.0 < plane_speed < 13.5 and abs(applied_turn) > 0.006:
                 side_off = 39
                 back_off = 10
                 perp = plane_angle + math.pi/2
@@ -1697,6 +1733,10 @@ while running:
                 target_y = missile["track_y"]
                 source_x, source_y = aaa_position
                 
+                dist_to_track = math.hypot(plane_x - missile["track_x"], plane_y - missile["track_y"])
+                # Only re-acquire if not decoyed, or if player flies very close to the seeker's current track
+                can_reacquire = not missile["is_decoyed"] or dist_to_track < 100
+
                 dist_to_plane = math.hypot(missile["x"] - plane_x, missile["y"] - plane_y)
                 if dist_to_plane > 500: rwr_state = "SEARCH"
                 elif dist_to_plane > 220: rwr_state = "TRACK"
@@ -1712,7 +1752,8 @@ while running:
                 player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
                 dist_ground_to_plane = math.hypot(plane_x - source_x, plane_y - source_y)
                 
-                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE:
+                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE and can_reacquire:
+                    missile["is_decoyed"] = False
                     if aircraft_type == "JET":
                         pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
                     else:
@@ -1726,6 +1767,8 @@ while running:
                     missile["lock_strength"] = min(1.0, radial_vel / 10) #notch sensitivity, lower is harder to notch
                     target_x, target_y = plane_x, plane_y
                 else:
+                    if missile["is_decoyed"]:
+                        target_x, target_y = missile["decoy_pos"]
                     missile["lock_strength"] = 0.0
 
                 if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE:
@@ -1745,9 +1788,13 @@ while running:
                             if dist_chaff_to_plane < 850:
                                 probability = missile["chaff_bias"] * ((1.0 - missile["lock_strength"])**2) * (1.0 - dist_chaff_to_plane / 850)
                                 if random.random() < probability:
+                                    missile["is_decoyed"] = True
+                                    missile["decoy_pos"] = [chaff["x"], chaff["y"]]
                                     target_x, target_y = chaff["x"], chaff["y"]
-                                    chaff_targeted = True
                                     break
+
+                if missile["is_decoyed"]:
+                    chaff_targeted = True
 
                 missile_speed = RADAR_MISSILE_SPEED
                 turn_rate = RADAR_TURN_RATE
@@ -1773,18 +1820,18 @@ while running:
                 else:
                     rwr_state = "MISSILE"
 
+                # Passive acquisition: only re-acquire plane if not decoyed or plane is near current track
+                dist_to_track = math.hypot(plane_x - missile["track_x"], plane_y - missile["track_y"])
+                can_reacquire = not missile["is_decoyed"] or dist_to_track < 100
+
                 # Radar cone detection
                 angle_to_player = math.atan2(plane_y - missile["y"], plane_x - missile["x"])
-                angle_diff = angle_to_player - missile["angle"]
-                while angle_diff > math.pi:
-                    angle_diff -= math.pi * 2
-                while angle_diff < -math.pi:
-                    angle_diff += math.pi * 2
+                angle_diff = (angle_to_player - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
 
                 player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
                 
-                # Only track player if within cone and range
-                if player_in_cone and distance_to_plane < RADAR_CONE_RANGE:
+                if player_in_cone and distance_to_plane < RADAR_CONE_RANGE and can_reacquire:
+                    missile["is_decoyed"] = False
                     # Calculate lock strength based on relative velocity (Closure Rate)
                     mvx, mvy = math.cos(missile["angle"]) * RADAR_MISSILE_SPEED, math.sin(missile["angle"]) * RADAR_MISSILE_SPEED
                     if aircraft_type == "JET":
@@ -1793,38 +1840,41 @@ while running:
                         pvx, pvy = heli_velocity_x, heli_velocity_y
                     
                     rel_vel = math.hypot(pvx - mvx, pvy - mvy)
-                    # 25.0 is a normalization factor for max closure vs missile speed
-                    missile["lock_strength"] = min(1.0, rel_vel / 25.0)
+                    # 12.5 normalization factor makes the seeker twice as sensitive to closure rate
+                    missile["lock_strength"] = min(1.0, rel_vel / 12.5)
                     
                     target_x = plane_x
                     target_y = plane_y
                 else:
                     missile["lock_strength"] = 0.0
+                    if missile["is_decoyed"]:
+                        target_x, target_y = missile["decoy_pos"]
 
-                if player_in_cone and distance_to_plane < RADAR_CONE_RANGE:
-                    for chaff in chaff_clouds:
-                        # Seeker cone check for chaff (from missile's perspective)
-                        dist_missile_to_chaff = math.hypot(chaff["x"] - missile["x"], chaff["y"] - missile["y"])
-                        if dist_missile_to_chaff > RADAR_CONE_RANGE:
-                            continue
-                            
-                        angle_to_chaff = math.atan2(chaff["y"] - missile["y"], chaff["x"] - missile["x"])
-                        angle_diff_chaff = angle_to_chaff - missile["angle"]
-                        while angle_diff_chaff > math.pi: angle_diff_chaff -= math.pi * 2
-                        while angle_diff_chaff < -math.pi: angle_diff_chaff += math.pi * 2
+                # Seeker logic: check for chaff distraction
+                for chaff in chaff_clouds:
+                    dist_missile_to_chaff = math.hypot(chaff["x"] - missile["x"], chaff["y"] - missile["y"])
+                    if dist_missile_to_chaff > RADAR_CONE_RANGE:
+                        continue
+                        
+                    angle_to_chaff = math.atan2(chaff["y"] - missile["y"], chaff["x"] - missile["x"])
+                    angle_diff_chaff = (angle_to_chaff - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
 
-                        if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
-                            dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
-                            if dist_chaff_to_plane < 850:
-                                probability = (
-                                    missile["chaff_bias"]
-                                    * ((1.0 - missile["lock_strength"])**2)
-                                    * (1.0 - dist_chaff_to_plane / 850)
-                                )
-                                if random.random() < probability:
-                                    target_x, target_y = chaff["x"], chaff["y"]
-                                    chaff_targeted = True
-                                    break
+                    if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
+                        dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
+                        if dist_chaff_to_plane < 850:
+                            probability = (
+                                missile["chaff_bias"]
+                                * ((1.0 - missile["lock_strength"])**2)
+                                * (1.0 - dist_chaff_to_plane / 850)
+                            )
+                            if random.random() < probability:
+                                missile["is_decoyed"] = True
+                                missile["decoy_pos"] = [chaff["x"], chaff["y"]]
+                                target_x, target_y = chaff["x"], chaff["y"]
+                                break
+                
+                if missile["is_decoyed"]:
+                    chaff_targeted = True
 
                 missile_speed = RADAR_MISSILE_SPEED
                 turn_rate = RADAR_TURN_RATE
@@ -2374,7 +2424,7 @@ while running:
     # Speed UI underneath player (numbers only)
     speed_sx, speed_sy = world_to_screen(plane_x, plane_y)
     current_spd = plane_speed if aircraft_type == "JET" else math.hypot(heli_velocity_x, heli_velocity_y)
-    speed_txt = font.render(str(int(current_spd * (1300 / 19.5))), True, GREEN)
+    speed_txt = font.render(str(int(current_spd * 66.6)), True, GREEN)
     screen.blit(speed_txt, (speed_sx - speed_txt.get_width() // 2, speed_sy + 40))
 
     for missile in missiles:
@@ -2389,9 +2439,42 @@ while running:
     # =====================================================
     # DRAW RADAR MISSILE SEEKER CONES
     # =====================================================
-    cone_angle_rad = math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
+
+    # Check if a ground-based radar missile is already in the air
+    stationary_radar_active = any(m["type"] == "STATIONARY_RADAR" for m in missiles)
+
+    if ground_radar_enabled and not stationary_radar_active:
+        sx, sy = world_to_screen(aaa_position[0], aaa_position[1])
+        angle_to_player = math.atan2(plane_y - aaa_position[1], plane_x - aaa_position[0])
+        # Narrow the cone as lock builds up (from 60 deg down to 5 deg)
+        dynamic_angle = RADAR_CONE_ANGLE_DEGREES - (55 * ground_radar_lock)
+        half_cone = math.radians(dynamic_angle / 2)
+        
+        # Draw Ground Radar Cone
+        cone_pts = [(sx, sy)]
+        segments = 10
+        for i in range(segments + 1):
+            ang = (angle_to_player - half_cone) + (half_cone * 2 * (i / segments))
+            px = int((aaa_position[0] + math.cos(ang) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
+            py = int((aaa_position[1] + math.sin(ang) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
+            cone_pts.append((px, py))
+        
+        alpha = 30 + int(ground_radar_lock * 50)
+        pygame.draw.polygon(fx_surface, (0, 180, 255, alpha), cone_pts)
+        
+        # Draw Scanning Line
+        sweep_ang = angle_to_player + ground_radar_sweep * half_cone
+        lx = int((aaa_position[0] + math.cos(sweep_ang) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
+        ly = int((aaa_position[1] + math.sin(sweep_ang) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
+        pygame.draw.line(fx_surface, (0, 255, 120, 220), (sx, sy), (lx, ly), 2)
+
     for missile in missiles:
         if "RADAR" in missile["type"]:
+            ls = missile.get("lock_strength", 0)
+            # Radar missiles use a fixed narrow FOV of 5 degrees once in flight
+            dynamic_angle = 5.0
+            cone_angle_rad = math.radians(dynamic_angle / 2)
+
             if missile["type"] == "STATIONARY_RADAR":
                 source_x, source_y = aaa_position
                 msx, msy = world_to_screen(source_x, source_y)
@@ -2520,7 +2603,7 @@ while running:
 
             "",
 
-            "1 = STATIONARY RADAR MISSILE",
+        f"1 = GROUND RADAR: {int(ground_radar_lock * 100)}%" if ground_radar_enabled else "1 = GROUND RADAR: OFF",
             "2 = IR MISSILE",
             "3 = MOBILE RADAR MISSILE",
 
