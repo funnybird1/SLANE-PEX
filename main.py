@@ -288,11 +288,16 @@ missiles = []
 IR_MISSILE_SPEED = 2000 / 66.6  # Setting 2000 here results in 2000 knots
 IR_TURN_RATE = 0.09
 
-RADAR_CONE_ANGLE_DEGREES = 60
-RADAR_CONE_RANGE = 5000 # Range for visual cone and detection
+FOX1_MISSILE_SPEED = 1500 / 66.6
+FOX1_TURN_RATE = 0.055
+FOX1_CONE_ANGLE = 60
 
-RADAR_MISSILE_SPEED = 1500 / 66.6 # Setting 1500 here results in 1500 knots
-RADAR_TURN_RATE = 0.055
+FOX3_MISSILE_SPEED = 1800 / 66.6
+FOX3_TURN_RATE = 0.06
+FOX3_CONE_ANGLE = 60
+FOX3_TRACK_FOV = 5
+
+RADAR_CONE_RANGE = 5000 # Range for visual cone and detection
 
 OPTICAL_MISSILE_SPEED = 380 / 66.6 # Setting 380 here results in 380 knots
 OPTICAL_TURN_RATE = 0.1
@@ -364,104 +369,14 @@ mountains = []
 
 mountain_refresh_timer = 0
 
-road_manager = None
-
-
 # endregion
-
-# region ROAD SYSTEM
-class RoadManager:
-
-    def __init__(self, start_x, start_y):
-
-        self.chunk_length = 480
-        self.chunk_width = 90
-        self.chunks = []
-
-        self.last_x = start_x
-        self.last_y = start_y
-        self.heading = random.uniform(0, math.pi * 2)
-
-        # Generate a long road once at the start
-        for _ in range(160):
-            self.spawn_chunk()
-
-    def spawn_chunk(self):
-
-        # Proactively steer toward the map center if approaching boundaries to create natural curves
-        margin = 3500
-        if (self.last_x < GRASS_SPAWN_MIN_X + margin or self.last_x > GRASS_SPAWN_MAX_X - margin or
-            self.last_y < GRASS_SPAWN_MIN_Y + margin or self.last_y > GRASS_SPAWN_MAX_Y - margin):
-            
-            target_center = math.atan2(-self.last_y, -self.last_x)
-            # Calculate the shortest angular difference to rotate toward center
-            diff = (target_center - self.heading + math.pi) % (math.pi * 2) - math.pi
-            self.heading += diff * 0.22 # Smoothly steer 22% of the way toward center per chunk
-
-        # Standard random meandering
-        self.heading += random.uniform(-0.12, 0.12)
-
-        next_x = self.last_x + math.cos(self.heading) * self.chunk_length
-        next_y = self.last_y + math.sin(self.heading) * self.chunk_length
-
-        self.chunks.append({
-            "x1": self.last_x,
-            "y1": self.last_y,
-            "x2": next_x,
-            "y2": next_y,
-            "width": self.chunk_width,
-        })
-
-        self.last_x = next_x
-        self.last_y = next_y
-
-    def update(self, player_x, player_y):
-        # Static road layout, no dynamic updates required
-        pass
-
-    def draw(self, v_min_x, v_max_x, v_min_y, v_max_y, ox, oy):
-
-        for chunk in self.chunks:
-            # Fast World-Space Culling
-            if not (v_min_x < chunk["x1"] < v_max_x or v_min_x < chunk["x2"] < v_max_x):
-                if not (v_min_y < chunk["y1"] < v_max_y or v_min_y < chunk["y2"] < v_max_y):
-                    continue
-
-            # Inlined world_to_screen
-            sx1 = int(chunk["x1"] * camera_zoom + ox)
-            sy1 = int(chunk["y1"] * camera_zoom + oy)
-            sx2 = int(chunk["x2"] * camera_zoom + ox)
-            sy2 = int(chunk["y2"] * camera_zoom + oy)
-
-            pygame.draw.line(
-                screen,
-                ROAD_EDGE,
-                (sx1, sy1),
-                (sx2, sy2),
-                18
-            )
-
-            pygame.draw.line(
-                screen,
-                ROAD,
-                (sx1, sy1),
-                (sx2, sy2),
-                10
-            )
-
-
-road_manager = RoadManager(plane_x, plane_y)
-
-
-# endregion
-
 # region TERRAIN
 def generate_mountains():
 
     global mountains
     mountains = []
 
-    for _ in range(80):
+    for _ in range(45):
 
         mountains.append({
             "x": random.randint(GRASS_SPAWN_MIN_X, GRASS_SPAWN_MAX_X),
@@ -475,7 +390,7 @@ generate_mountains()
 
 grass_blades = []
 
-for _ in range(600):
+for _ in range(800):
 
     gx = random.randint(-12000, 12000)
     gy = random.randint(-12000, 12000)
@@ -521,7 +436,6 @@ def reset_plane():
 
     global plane_x
     global plane_y
-    global road_manager
 
     global plane_speed
     global plane_throttle
@@ -554,8 +468,6 @@ def reset_plane():
     ground_radar_enabled = False
     ground_radar_lock = 0.0
     missiles = [m for m in missiles if m["type"] != "STATIONARY_RADAR"]
-
-    road_manager = RoadManager(plane_x, plane_y)
 
 # =========================================================
 # DRAW AIRCRAFT
@@ -701,36 +613,27 @@ def draw_plane(x, y, angle, turn_rate=0):
 
 # region MISSILE DRAWING
 def draw_missile(
-    x,
-    y,
+    sx,
+    sy,
     angle,
-    missile_type
+    missile_type,
+    scale=1.0
 ):
 
     points = [
-        (10, 0),
-        (-6, -3),
-        (-2, 0),
-        (-6, 3)
+        (10 * scale, 0),
+        (-6 * scale, -3 * scale),
+        (-2 * scale, 0),
+        (-6 * scale, 3 * scale)
     ]
 
-    rotated = []
-
-    for px, py in points:
-
-        rx = (
-            px * math.cos(angle)
-            - py * math.sin(angle)
-        )
-
-        ry = (
-            px * math.sin(angle)
-            + py * math.cos(angle)
-        )
-
-        rotated.append(
-            (x + rx, y + ry)
-        )
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    
+    screen_points = [
+        (sx + (px * cos_a - py * sin_a), sy + (px * sin_a + py * cos_a))
+        for px, py in points
+    ]
 
     color = RED
 
@@ -739,11 +642,6 @@ def draw_missile(
 
     if missile_type == "OPTICAL":
         color = PURPLE
-
-    screen_points = [
-        world_to_screen(rx, ry)
-        for rx, ry in rotated
-    ]
 
     pygame.draw.polygon(
         screen,
@@ -828,7 +726,7 @@ def draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, ox, oy):
 
     grass_scale = camera_zoom
     # Skip blades if zoomed very far out to save performance
-    step = 1 if camera_zoom > 0.4 else (2 if camera_zoom > 0.2 else 4)
+    step = 1 if camera_zoom > 0.7 else (2 if camera_zoom > 0.35 else 3)
 
     for blade in grass_blades[::step]:
         if not (v_min_x < blade["x"] < v_max_x and v_min_y < blade["y"] < v_max_y):
@@ -874,9 +772,6 @@ def draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, ox, oy):
             (right_x2, right_y2),
             max(1, int(2 * grass_scale))
         )
-
-    if road_manager is not None:
-        road_manager.draw(v_min_x, v_max_x, v_min_y, v_max_y, ox, oy)
 
     # Draw Runway
     rsx = int((WIDTH * 0.5 - 200) * camera_zoom + ox)
@@ -1311,31 +1206,34 @@ while running:
                     ground_radar_lock = 0.0
 
             if event.key == pygame.K_2:
-                if not missiles:
-                    ir_launch_sound.play()
-                    spawn_missile("IR")
+                ir_launch_sound.play()
+                spawn_missile("IR")
       
             if event.key == pygame.K_3:
-                if not missiles:
-                    radar_launch_sound.play()
-                    spawn_missile("RADAR")
+                radar_launch_sound.play()
+                spawn_missile("RADAR")
 
             if event.key == pygame.K_z:
                 aaa_enabled = not aaa_enabled
 
-            if event.key == pygame.K_o:
-                camera_zoom = max(MIN_ZOOM, round(camera_zoom / ZOOM_STEP, 2))
-
-            if event.key == pygame.K_i:
-                camera_zoom = min(MAX_ZOOM, round(camera_zoom * ZOOM_STEP, 2))
-
             if event.key == pygame.K_h:
                 show_controls = not show_controls
+
+            if event.key == pygame.K_r:
+                reset_plane()
 
 
     keys = pygame.key.get_pressed()
 
     if not paused:
+
+        # =================================================
+        # CAMERA ZOOM (HOLDABLE)
+        # =================================================
+        if keys[pygame.K_o]:
+            camera_zoom = max(MIN_ZOOM, camera_zoom / 1.03)
+        if keys[pygame.K_i]:
+            camera_zoom = min(MAX_ZOOM, camera_zoom * 1.03)
 
         # =================================================
         # GROUND RADAR LOGIC
@@ -1348,11 +1246,12 @@ while running:
             dist = math.hypot(dx, dy)
             
             if dist < RADAR_CONE_RANGE:
-                # Only build lock if no missiles are currently active
-                if not missiles and abs(ground_radar_sweep) < 0.25:
+                # Check for existing stationary radar missile specifically
+                stationary_active = any(m["type"] == "STATIONARY_RADAR" for m in missiles)
+                if not stationary_active and abs(ground_radar_sweep) < 0.25:
                     ground_radar_lock = min(1.0, ground_radar_lock + 0.05)
                 
-                if ground_radar_lock >= 1.0 and not missiles:
+                if ground_radar_lock >= 1.0 and not stationary_active:
                     radar_launch_sound.play()
                     spawn_missile("STATIONARY_RADAR")
                     ground_radar_lock = 0.0
@@ -1465,7 +1364,7 @@ while running:
             drag = (plane_speed / max_speed) * 0.08
             if plane_throttle == 0 and keys[pygame.K_s]:
                 drag *= 2.0
-                if current_knots < 40:
+                if plane_speed * 66.6 < 40:
                     plane_speed -= 0.015 # Extra braking force to reach 0 faster
 
             turn_bleed = abs(applied_turn) * 0.375
@@ -1562,8 +1461,6 @@ while running:
 
             plane_x += heli_velocity_x
             plane_y += heli_velocity_y
-
-        road_manager.update(plane_x, plane_y)
 
         heat_x = (
             plane_x
@@ -1701,13 +1598,12 @@ while running:
                 target_y = heat_y
 
                 for flare in flares:
+                    dx_f = missile["x"] - flare["x"]
+                    dy_f = missile["y"] - flare["y"]
+                    dist_sq = dx_f*dx_f + dy_f*dy_f
 
-                    flare_dist = math.hypot(
-                        missile["x"] - flare["x"],
-                        missile["y"] - flare["y"]
-                    )
-
-                    if flare_dist < 220:
+                    if dist_sq < 48400: # 220^2
+                        flare_dist = math.sqrt(dist_sq)
 
                         probability = (
                             missile["flare_bias"]
@@ -1733,11 +1629,29 @@ while running:
                 target_y = missile["track_y"]
                 source_x, source_y = aaa_position
                 
-                dist_to_track = math.hypot(plane_x - missile["track_x"], plane_y - missile["track_y"])
+                # Check if the decoy is still valid (chaff cloud still exists at track point)
+                if missile["is_decoyed"]:
+                    decoy_still_visible = False
+                    for chaff in chaff_clouds:
+                        dx_dc = chaff["x"] - missile["track_x"]
+                        dy_dc = chaff["y"] - missile["track_y"]
+                        if dx_dc * dx_dc + dy_dc * dy_dc < 62500: # 250^2 area
+                            decoy_still_visible = True
+                            # Update decoy position to follow the moving chaff
+                            missile["decoy_pos"] = [chaff["x"], chaff["y"]]
+                            break
+                    if not decoy_still_visible:
+                        missile["is_decoyed"] = False
+
+                dx_t = plane_x - missile["track_x"]
+                dy_t = plane_y - missile["track_y"]
+                dist_to_track = math.sqrt(dx_t*dx_t + dy_t*dy_t)
                 # Only re-acquire if not decoyed, or if player flies very close to the seeker's current track
                 can_reacquire = not missile["is_decoyed"] or dist_to_track < 100
 
-                dist_to_plane = math.hypot(missile["x"] - plane_x, missile["y"] - plane_y)
+                dx_p = missile["x"] - plane_x
+                dy_p = missile["y"] - plane_y
+                dist_to_plane = math.sqrt(dx_p*dx_p + dy_p*dy_p)
                 if dist_to_plane > 500: rwr_state = "SEARCH"
                 elif dist_to_plane > 220: rwr_state = "TRACK"
                 else: rwr_state = "MISSILE"
@@ -1746,13 +1660,16 @@ while running:
                 angle_to_player = math.atan2(plane_y - source_y, plane_x - source_x)
                 radar_angle = math.atan2(missile["track_y"] - source_y, missile["track_x"] - source_x)
                 angle_diff = angle_to_player - radar_angle
-                while angle_diff > math.pi: angle_diff -= math.pi * 2
-                while angle_diff < -math.pi: angle_diff += math.pi * 2
+                angle_diff = (angle_diff + math.pi) % (math.pi * 2) - math.pi
 
-                player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
-                dist_ground_to_plane = math.hypot(plane_x - source_x, plane_y - source_y)
+                # Stationary Radar only exists when tracking; use narrow 5-degree beam for detection
+                player_in_cone = abs(angle_diff) <= math.radians(5.0 / 2)
+                dx_gp = plane_x - source_x
+                dy_gp = plane_y - source_y
+                dist_ground_to_plane_sq = dx_gp*dx_gp + dy_gp*dy_gp
+                dist_ground_to_plane = math.sqrt(dist_ground_to_plane_sq)
                 
-                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE and can_reacquire:
+                if player_in_cone and dist_ground_to_plane_sq < 25000000 and can_reacquire: # 5000^2
                     missile["is_decoyed"] = False
                     if aircraft_type == "JET":
                         pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
@@ -1762,7 +1679,7 @@ while running:
                     # Calculate Radial Velocity (Closure Rate) relative to the ground station
                     # Flying perpendicular to the radar beam (notching) reduces this value to zero
                     dx_p, dy_p = plane_x - source_x, plane_y - source_y
-                    radial_vel = abs((pvx * dx_p + pvy * dy_p) / dist_ground_to_plane) if dist_ground_to_plane > 0 else 0
+                    radial_vel = abs((pvx * dx_p + pvy * dy_p) / dist_ground_to_plane) if dist_ground_to_plane > 0.001 else 0
                     
                     missile["lock_strength"] = min(1.0, radial_vel / 10) #notch sensitivity, lower is harder to notch
                     target_x, target_y = plane_x, plane_y
@@ -1771,21 +1688,26 @@ while running:
                         target_x, target_y = missile["decoy_pos"]
                     missile["lock_strength"] = 0.0
 
-                if player_in_cone and dist_ground_to_plane < RADAR_CONE_RANGE:
+                # Seeker logic: check for chaff distraction within the beam
+                if dist_ground_to_plane_sq < 25000000:
                     for chaff in chaff_clouds:
                         # Radar cone check from ground source
-                        dist_ground_to_chaff = math.hypot(chaff["x"] - source_x, chaff["y"] - source_y)
-                        if dist_ground_to_chaff > RADAR_CONE_RANGE:
+                        dx_gc = chaff["x"] - source_x
+                        dy_gc = chaff["y"] - source_y
+                        if dx_gc*dx_gc + dy_gc*dy_gc > 25000000:
                             continue
                             
                         angle_to_chaff = math.atan2(chaff["y"] - source_y, chaff["x"] - source_x)
                         angle_diff_chaff = angle_to_chaff - radar_angle
-                        while angle_diff_chaff > math.pi: angle_diff_chaff -= math.pi * 2
-                        while angle_diff_chaff < -math.pi: angle_diff_chaff += math.pi * 2
+                        angle_diff_chaff = (angle_diff_chaff + math.pi) % (math.pi * 2) - math.pi
 
-                        if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
-                            dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
-                            if dist_chaff_to_plane < 850:
+                        # Only see chaff within the narrow tracking beam
+                        if abs(angle_diff_chaff) <= math.radians(5.0 / 2):
+                            dx_cp = chaff["x"] - plane_x
+                            dy_cp = chaff["y"] - plane_y
+                            dist_cp_sq = dx_cp*dx_cp + dy_cp*dy_cp
+                            if dist_cp_sq < 722500: # 850^2
+                                dist_chaff_to_plane = math.sqrt(dist_cp_sq)
                                 probability = missile["chaff_bias"] * ((1.0 - missile["lock_strength"])**2) * (1.0 - dist_chaff_to_plane / 850)
                                 if random.random() < probability:
                                     missile["is_decoyed"] = True
@@ -1796,8 +1718,8 @@ while running:
                 if missile["is_decoyed"]:
                     chaff_targeted = True
 
-                missile_speed = RADAR_MISSILE_SPEED
-                turn_rate = RADAR_TURN_RATE
+                missile_speed = FOX1_MISSILE_SPEED
+                turn_rate = FOX1_TURN_RATE
 
             elif missile["type"] == "RADAR":
 
@@ -1806,11 +1728,11 @@ while running:
                 target_x = missile["track_x"] # Default to current track if player not in cone
                 target_y = missile["track_y"]
 
-                distance_to_plane = math.hypot(
-                    missile["x"] - plane_x,
-                    missile["y"] - plane_y
-                )
-
+                dx_p = missile["x"] - plane_x
+                dy_p = missile["y"] - plane_y
+                dist_p_sq = dx_p*dx_p + dy_p*dy_p
+                distance_to_plane = math.sqrt(dist_p_sq)
+                
                 if distance_to_plane > 500:
                     rwr_state = "SEARCH"
 
@@ -1820,20 +1742,39 @@ while running:
                 else:
                     rwr_state = "MISSILE"
 
+                # Check if the decoy is still valid (chaff cloud still exists at track point)
+                if missile["is_decoyed"]:
+                    decoy_still_visible = False
+                    for chaff in chaff_clouds:
+                        dx_dc = chaff["x"] - missile["track_x"]
+                        dy_dc = chaff["y"] - missile["track_y"]
+                        if dx_dc * dx_dc + dy_dc * dy_dc < 62500: # 250^2 area
+                            decoy_still_visible = True
+                            # Update decoy position to follow the moving chaff
+                            missile["decoy_pos"] = [chaff["x"], chaff["y"]]
+                            break
+                    if not decoy_still_visible:
+                        missile["is_decoyed"] = False
+
                 # Passive acquisition: only re-acquire plane if not decoyed or plane is near current track
-                dist_to_track = math.hypot(plane_x - missile["track_x"], plane_y - missile["track_y"])
+                dx_t = plane_x - missile["track_x"]
+                dy_t = plane_y - missile["track_y"]
+                dist_to_track = math.sqrt(dx_t*dx_t + dy_t*dy_t)
                 can_reacquire = not missile["is_decoyed"] or dist_to_track < 100
 
                 # Radar cone detection
                 angle_to_player = math.atan2(plane_y - missile["y"], plane_x - missile["x"])
                 angle_diff = (angle_to_player - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
 
-                player_in_cone = abs(angle_diff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2)
+                # Active Radar seeker: Acquire in wide cone, track/re-acquire in narrow beam
+                player_in_acq_cone = abs(angle_diff) <= math.radians(FOX3_CONE_ANGLE / 2)
+                player_in_track_fov = abs(angle_diff) <= math.radians(FOX3_TRACK_FOV / 2)
+                can_see_player = player_in_track_fov if missile["is_decoyed"] else player_in_acq_cone
                 
-                if player_in_cone and distance_to_plane < RADAR_CONE_RANGE and can_reacquire:
+                if can_see_player and dist_p_sq < 25000000 and can_reacquire: # 5000^2
                     missile["is_decoyed"] = False
                     # Calculate lock strength based on relative velocity (Closure Rate)
-                    mvx, mvy = math.cos(missile["angle"]) * RADAR_MISSILE_SPEED, math.sin(missile["angle"]) * RADAR_MISSILE_SPEED
+                    mvx, mvy = math.cos(missile["angle"]) * FOX3_MISSILE_SPEED, math.sin(missile["angle"]) * FOX3_MISSILE_SPEED
                     if aircraft_type == "JET":
                         pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
                     else:
@@ -1852,16 +1793,22 @@ while running:
 
                 # Seeker logic: check for chaff distraction
                 for chaff in chaff_clouds:
-                    dist_missile_to_chaff = math.hypot(chaff["x"] - missile["x"], chaff["y"] - missile["y"])
-                    if dist_missile_to_chaff > RADAR_CONE_RANGE:
+                    dx_mc = chaff["x"] - missile["x"]
+                    dy_mc = chaff["y"] - missile["y"]
+                    dist_mc_sq = dx_mc*dx_mc + dy_mc*dy_mc
+                    if dist_mc_sq > 25000000: # 5000^2
                         continue
                         
                     angle_to_chaff = math.atan2(chaff["y"] - missile["y"], chaff["x"] - missile["x"])
                     angle_diff_chaff = (angle_to_chaff - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
 
-                    if abs(angle_diff_chaff) <= math.radians(RADAR_CONE_ANGLE_DEGREES / 2):
-                        dist_chaff_to_plane = math.hypot(chaff["x"] - plane_x, chaff["y"] - plane_y)
-                        if dist_chaff_to_plane < 850:
+                    # Seeker distracted only by chaff within the narrow track beam
+                    if abs(angle_diff_chaff) <= math.radians(FOX3_TRACK_FOV / 2):
+                        dx_cp = chaff["x"] - plane_x
+                        dy_cp = chaff["y"] - plane_y
+                        dist_cp_sq = dx_cp*dx_cp + dy_cp*dy_cp
+                        if dist_cp_sq < 722500: # 850^2
+                            dist_chaff_to_plane = math.sqrt(dist_cp_sq)
                             probability = (
                                 missile["chaff_bias"]
                                 * ((1.0 - missile["lock_strength"])**2)
@@ -1876,16 +1823,15 @@ while running:
                 if missile["is_decoyed"]:
                     chaff_targeted = True
 
-                missile_speed = RADAR_MISSILE_SPEED
-                turn_rate = RADAR_TURN_RATE
+                missile_speed = FOX3_MISSILE_SPEED
+                turn_rate = FOX3_TURN_RATE
 
             else:
 
-                distance_to_plane = math.hypot(
-                    missile["x"] - plane_x,
-                    missile["y"] - plane_y
-                )
-
+                dx_p = missile["x"] - plane_x
+                dy_p = missile["y"] - plane_y
+                distance_to_plane = math.sqrt(dx_p*dx_p + dy_p*dy_p)
+                
                 if distance_to_plane < 450:
                     lwr_warning = True
 
@@ -1895,15 +1841,13 @@ while running:
                 # Optimized smoke check
                 for smoke in smoke_clouds[::2]: # Check half the smoke for performance
 
-                    smoke_dist = (
-                        missile["x"] - smoke["x"],
-                        missile["y"] - smoke["y"]
-                    )
-
-                    if smoke_dist < smoke["radius"] + 40:
+                    dx_s = missile["x"] - smoke["x"]
+                    dy_s = missile["y"] - smoke["y"]
+                    radius_sum = smoke["radius"] + 40
+                    # Use squared distance to avoid expensive square root (math.hypot)
+                    if dx_s*dx_s + dy_s*dy_s < radius_sum * radius_sum:
 
                         smoke_blocked = True
-
                         target_x = smoke["x"]
                         target_y = smoke["y"]
 
@@ -1975,7 +1919,7 @@ while running:
                 )
             )
 
-            if len(missile["trail"]) > 220:
+            if len(missile["trail"]) > 100:
                 missile["trail"].pop(0)
 
             distance = math.hypot(dx, dy)
@@ -2177,9 +2121,11 @@ while running:
         if missile["type"] == "OPTICAL":
             trail_color = PURPLE
 
-        if len(missile["trail"]) > 1:
+        # Optimization: Only process trails if the missile or its recent path might be visible
+        if len(missile["trail"]) > 1 and (v_min_x - 1000 < missile["x"] < v_max_x + 1000 and 
+                                         v_min_y - 1000 < missile["y"] < v_max_y + 1000):
             # Sub-sample trails based on zoom level to drastically reduce loop overhead
-            t_step = 1 if camera_zoom > 0.8 else (2 if camera_zoom > 0.4 else 3)
+            t_step = 1 if camera_zoom > 1.2 else (2 if camera_zoom > 0.6 else 4)
             screen_pts = [
                 (int(p[0] * camera_zoom + cam_ox), int(p[1] * camera_zoom + cam_oy))
                 for p in missile["trail"][::t_step]
@@ -2192,13 +2138,15 @@ while running:
     # =====================================================
 
     effect_scale = max(0.6, camera_zoom)
+    # Pre-calculated bounds for effect culling
+    m_v_min_x, m_v_max_x = v_min_x - 100, v_max_x + 100
+    m_v_min_y, m_v_max_y = v_min_y - 100, v_max_y + 100
 
     for flare in flares:
-
-        sx, sy = world_to_screen(
-            flare["x"],
-            flare["y"]
-        )
+        if not (m_v_min_x < flare["x"] < m_v_max_x and m_v_min_y < flare["y"] < m_v_max_y):
+            continue
+        sx = int(flare["x"] * camera_zoom + cam_ox)
+        sy = int(flare["y"] * camera_zoom + cam_oy)
 
         pygame.draw.circle(
             screen,
@@ -2208,11 +2156,10 @@ while running:
         )
 
     for chaff in chaff_clouds:
-
-        sx, sy = world_to_screen(
-            chaff["x"],
-            chaff["y"]
-        )
+        if not (m_v_min_x < chaff["x"] < m_v_max_x and m_v_min_y < chaff["y"] < m_v_max_y):
+            continue
+        sx = int(chaff["x"] * camera_zoom + cam_ox)
+        sy = int(chaff["y"] * camera_zoom + cam_oy)
 
         pygame.draw.circle(
             screen,
@@ -2222,11 +2169,10 @@ while running:
         )
 
     for smoke in smoke_clouds:
-
-        sx, sy = world_to_screen(
-            smoke["x"],
-            smoke["y"]
-        )
+        if not (m_v_min_x - 50 < smoke["x"] < m_v_max_x + 50 and m_v_min_y - 50 < smoke["y"] < m_v_max_y + 50):
+            continue
+        sx = int(smoke["x"] * camera_zoom + cam_ox)
+        sy = int(smoke["y"] * camera_zoom + cam_oy)
 
         pygame.draw.circle(
             screen,
@@ -2293,32 +2239,29 @@ while running:
     # =====================================================
 
     for missile in missiles:
-
         line_color = GREY
         dot_color = GREEN
 
         if "RADAR" in missile["type"]:
-
             line_color = LIGHT_BLUE
             dot_color = CYAN
 
         if missile["type"] == "OPTICAL":
-
             line_color = PURPLE
             dot_color = PURPLE
+
+        msx, msy = int(missile["x"] * camera_zoom + cam_ox), int(missile["y"] * camera_zoom + cam_oy)
+        mtx, mty = int(missile["track_x"] * camera_zoom + cam_ox), int(missile["track_y"] * camera_zoom + cam_oy)
 
         pygame.draw.line(
             screen,
             line_color,
-            world_to_screen(missile["x"], missile["y"]),
-            world_to_screen(missile["track_x"], missile["track_y"]),
+            (msx, msy),
+            (mtx, mty),
             1
         )
 
-        sx, sy = world_to_screen(
-            missile["track_x"],
-            missile["track_y"]
-        )
+        sx, sy = mtx, mty
 
         pygame.draw.circle(
             screen,
@@ -2349,54 +2292,10 @@ while running:
         )
 
     for flak in bofors_flak:
- 
-        smoke_surface = pygame.Surface(
-            (
-                int(flak["smoke"] * 2),
-                int(flak["smoke"] * 2)
-            ),
-            pygame.SRCALPHA
-        )
- 
-        alpha = max(
-            0,
-            min(
-                180,
-                flak["life"] * 3
-            )
-        )
-
-        pygame.draw.circle(
-   
-            smoke_surface,
-
-            (
-                45,
-                45,
-                45,
-                alpha
-            ),
-
-            (
-                int(flak["smoke"]),
-                int(flak["smoke"])
-            ),
-
-            int(flak["smoke"])
-        )
-
-        sx, sy = world_to_screen(
-            flak["x"],
-            flak["y"]
-        )
-
-        screen.blit(
-            smoke_surface,
-            (
-                sx - flak["smoke"],
-                sy - flak["smoke"]
-            )
-        )
+        alpha = max(0, min(180, flak["life"] * 3))
+        sx, sy = world_to_screen(flak["x"], flak["y"])
+        # Optimization: Draw flak smoke directly to screen or fx_surface without per-frame allocation
+        pygame.draw.circle(fx_surface, (45, 45, 45, alpha), (sx, sy), int(flak["smoke"] * camera_zoom))
     # =====================================================
     # DRAW BULLETS
     # =====================================================
@@ -2425,16 +2324,20 @@ while running:
     speed_sx, speed_sy = world_to_screen(plane_x, plane_y)
     current_spd = plane_speed if aircraft_type == "JET" else math.hypot(heli_velocity_x, heli_velocity_y)
     speed_txt = font.render(str(int(current_spd * 66.6)), True, GREEN)
-    screen.blit(speed_txt, (speed_sx - speed_txt.get_width() // 2, speed_sy + 40))
+    screen.blit(speed_txt, (speed_sx - speed_txt.get_width() // 2, speed_sy + int(60 * camera_zoom + 15))) #45
 
     for missile in missiles:
-
-        draw_missile(
-            missile["x"],
-            missile["y"],
-            missile["angle"],
-            missile["type"]
-        )
+        # Visibility check for missile body
+        if (v_min_x - 50 < missile["x"] < v_max_x + 50 and 
+            v_min_y - 50 < missile["y"] < v_max_y + 50):
+            msx, msy = int(missile["x"] * camera_zoom + cam_ox), int(missile["y"] * camera_zoom + cam_oy)
+            draw_missile(
+                msx,
+                msy,
+                missile["angle"],
+                missile["type"],
+                scale=camera_zoom
+            )
 
     # =====================================================
     # DRAW RADAR MISSILE SEEKER CONES
@@ -2442,12 +2345,19 @@ while running:
 
     # Check if a ground-based radar missile is already in the air
     stationary_radar_active = any(m["type"] == "STATIONARY_RADAR" for m in missiles)
+    
+    # Optimization: Calculate a visual range that doesn't exceed screen needs
+    max_view_dist = (max(WIDTH, HEIGHT) / max(0.1, camera_zoom)) * 1.2
+    v_cone_range = min(RADAR_CONE_RANGE, max_view_dist)
 
     if ground_radar_enabled and not stationary_radar_active:
-        sx, sy = world_to_screen(aaa_position[0], aaa_position[1])
+        ax, ay = aaa_position
+        sx = int(ax * camera_zoom + cam_ox)
+        sy = int(ay * camera_zoom + cam_oy)
+        
         angle_to_player = math.atan2(plane_y - aaa_position[1], plane_x - aaa_position[0])
         # Narrow the cone as lock builds up (from 60 deg down to 5 deg)
-        dynamic_angle = RADAR_CONE_ANGLE_DEGREES - (55 * ground_radar_lock)
+        dynamic_angle = FOX1_CONE_ANGLE - ((FOX1_CONE_ANGLE - 5) * ground_radar_lock)
         half_cone = math.radians(dynamic_angle / 2)
         
         # Draw Ground Radar Cone
@@ -2455,8 +2365,8 @@ while running:
         segments = 10
         for i in range(segments + 1):
             ang = (angle_to_player - half_cone) + (half_cone * 2 * (i / segments))
-            px = int((aaa_position[0] + math.cos(ang) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
-            py = int((aaa_position[1] + math.sin(ang) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
+            px = int((ax + math.cos(ang) * v_cone_range) * camera_zoom + cam_ox)
+            py = int((ay + math.sin(ang) * v_cone_range) * camera_zoom + cam_oy)
             cone_pts.append((px, py))
         
         alpha = 30 + int(ground_radar_lock * 50)
@@ -2464,24 +2374,42 @@ while running:
         
         # Draw Scanning Line
         sweep_ang = angle_to_player + ground_radar_sweep * half_cone
-        lx = int((aaa_position[0] + math.cos(sweep_ang) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
-        ly = int((aaa_position[1] + math.sin(sweep_ang) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
+        lx = int((ax + math.cos(sweep_ang) * v_cone_range) * camera_zoom + cam_ox)
+        ly = int((ay + math.sin(sweep_ang) * v_cone_range) * camera_zoom + cam_oy)
         pygame.draw.line(fx_surface, (0, 255, 120, 220), (sx, sy), (lx, ly), 2)
 
     for missile in missiles:
         if "RADAR" in missile["type"]:
+            # Only draw cones for missiles near enough to be visible
+            if not (v_min_x - 3000 < missile["x"] < v_max_x + 3000 and 
+                    v_min_y - 3000 < missile["y"] < v_max_y + 3000):
+                continue
+                
             ls = missile.get("lock_strength", 0)
-            # Radar missiles use a fixed narrow FOV of 5 degrees once in flight
-            dynamic_angle = 5.0
-            cone_angle_rad = math.radians(dynamic_angle / 2)
-
+            
             if missile["type"] == "STATIONARY_RADAR":
+                cone_angle_rad = math.radians(5.0 / 2)
                 source_x, source_y = aaa_position
-                msx, msy = world_to_screen(source_x, source_y)
+                msx = int(source_x * camera_zoom + cam_ox)
+                msy = int(source_y * camera_zoom + cam_oy)
                 ref_angle = math.atan2(missile["track_y"] - source_y, missile["track_x"] - source_x)
             else:
-                msx, msy = world_to_screen(missile["x"], missile["y"])
+                # FOX 3: Show wide acquisition limit and narrow track beam
+                msx = int(missile["x"] * camera_zoom + cam_ox)
+                msy = int(missile["y"] * camera_zoom + cam_oy)
                 ref_angle = missile["angle"]
+                
+                # Draw Wide Acquisition Cone (Transparent)
+                if camera_zoom > 0.4: # Skip extra detail if zoomed out far
+                    w_half = math.radians(FOX3_CONE_ANGLE / 2)
+                    w_pts = [(msx, msy)]
+                    for i in range(7):
+                        a = (ref_angle - w_half) + (w_half * 2 * (i / 6))
+                        w_pts.append((int((missile["x"] + math.cos(a) * v_cone_range) * camera_zoom + cam_ox),
+                                     int((missile["y"] + math.sin(a) * v_cone_range) * camera_zoom + cam_oy)))
+                    pygame.draw.polygon(fx_surface, (0, 100, 255, 15), w_pts)
+                
+                cone_angle_rad = math.radians(FOX3_TRACK_FOV / 2)
 
             points = [(msx, msy)]
             segments = 6
@@ -2489,8 +2417,8 @@ while running:
                 step_angle = (ref_angle - cone_angle_rad) + (cone_angle_rad * 2 * (i / segments))
                 origin_x = aaa_position[0] if missile["type"] == "STATIONARY_RADAR" else missile["x"]
                 origin_y = aaa_position[1] if missile["type"] == "STATIONARY_RADAR" else missile["y"]
-                spx = int((origin_x + math.cos(step_angle) * RADAR_CONE_RANGE) * camera_zoom + cam_ox)
-                spy = int((origin_y + math.sin(step_angle) * RADAR_CONE_RANGE) * camera_zoom + cam_oy)
+                spx = int((origin_x + math.cos(step_angle) * v_cone_range) * camera_zoom + cam_ox)
+                spy = int((origin_y + math.sin(step_angle) * v_cone_range) * camera_zoom + cam_oy)
                 points.append((spx, spy))
 
             ls = missile.get("lock_strength", 0)
@@ -2501,6 +2429,19 @@ while running:
                 dynamic_cone_color,
                 points
             )
+
+    # --- Optimized RWR Screen Flash ---
+    if rwr_state == "MISSILE":
+        # Sync the border flash with the RWR text oscillation (every 150ms)
+        if (pygame.time.get_ticks() // 150) % 2 == 0:
+            border_color = (255, 0, 0, 90)
+            thickness = 18
+            # Draw directly to fx_surface to avoid allocating a new full-screen surface every frame
+            pygame.draw.rect(fx_surface, border_color, (0, 0, WIDTH, thickness))
+            pygame.draw.rect(fx_surface, border_color, (0, HEIGHT - thickness, WIDTH, thickness))
+            pygame.draw.rect(fx_surface, border_color, (0, 0, thickness, HEIGHT))
+            pygame.draw.rect(fx_surface, border_color, (WIDTH - thickness, 0, thickness, HEIGHT))
+
     screen.blit(fx_surface, (0, 0))
 
     # =====================================================
@@ -2522,21 +2463,6 @@ while running:
                 display_color = RED
             else:
                 display_color = WHITE
-
-            flash = pygame.Surface(
-                (WIDTH, HEIGHT),
-                pygame.SRCALPHA
-            )
-
-            border_color = (255, 0, 0, 90)
-            thickness = 18
-
-            pygame.draw.rect(flash, border_color, (0, 0, WIDTH, thickness))
-            pygame.draw.rect(flash, border_color, (0, HEIGHT - thickness, WIDTH, thickness))
-            pygame.draw.rect(flash, border_color, (0, 0, thickness, HEIGHT))
-            pygame.draw.rect(flash, border_color, (WIDTH - thickness, 0, thickness, HEIGHT))
-
-            screen.blit(flash, (0, 0))
 
         txt = big_font.render(
             f"RWR: {rwr_state}",
@@ -2635,6 +2561,15 @@ while running:
 
             y += 24
 
+        # --- PERFORMANCE OVERLAY (Bottom Right) ---
+        raw_ms = clock.get_rawtime()  # Time spent in the loop before the tick delay
+        cpu_load = min(100, int((raw_ms / 16.67) * 100))
+
+        perf_text = f"FPS: {int(clock.get_fps()):3} | FT: {raw_ms:2}ms | LOAD: {cpu_load:3}%"
+        perf_surf = font.render(perf_text, True, WHITE)
+        screen.blit(perf_surf, (WIDTH - perf_surf.get_width() - 20, HEIGHT - 40))
+
+
     throttle_pct = int(plane_throttle)
 
     gauge_x = 80
@@ -2695,11 +2630,6 @@ while running:
                 HEIGHT // 2 - 40
             )
         )
-
-    # FPS Counter (Bottom Right)
-    fps_surf = font.render(f"FPS: {int(clock.get_fps())}", True, GREEN)
-    screen.blit(fps_surf, (WIDTH - fps_surf.get_width() - 20, HEIGHT - 40))
-
     pygame.display.flip()
 
 pygame.quit()
