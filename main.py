@@ -167,7 +167,7 @@ applied_turn = 0
 turn_speed = 0.0225
 
 camera_zoom = 1.0
-MIN_ZOOM = 0.17
+MIN_ZOOM = 0.085
 MAX_ZOOM = 3.2
 ZOOM_STEP = 1.20 #1.08
 GRASS_SPAWN_MIN_X = -12000
@@ -296,11 +296,18 @@ FOX3_MISSILE_SPEED = 1800 / 66.6
 FOX3_TURN_RATE = 0.06
 FOX3_CONE_ANGLE = 60
 FOX3_TRACK_FOV = 5
+FOX3_GIMBAL_ANGLE = 60
+FOX3_FUEL = 400  # frames (~6.7s at 60fps)
 
-RADAR_CONE_RANGE = 5000 # Range for visual cone and detection
+FOX1_RADAR_RANGE = 10000 # Ground radar range
+RADAR_CONE_RANGE = 10000 # Range for visual cone and detection (FOX-3)
+FOX1_FUEL = 350  # frames (~5.8s)
 
 OPTICAL_MISSILE_SPEED = 380 / 66.6 # Setting 380 here results in 380 knots
 OPTICAL_TURN_RATE = 0.1
+OPTICAL_FUEL = 250  # frames (~4.2s)
+
+IR_FUEL = 300  # frames (~5.0s)
 
 # endregion
 
@@ -421,6 +428,11 @@ for _ in range(800):
 font = pygame.font.SysFont(
     "consolas",
     22
+)
+
+font_small = pygame.font.SysFont(
+    "consolas",
+    14
 )
 
 big_font = pygame.font.SysFont(
@@ -917,8 +929,8 @@ def spawn_missile(missile_type):
     spawn_side = random.randint(0, 3)
     half_w = WIDTH * 0.5 + 40
     half_h = HEIGHT * 0.5 + 40
-    spawn_offset_x = half_w * 3
-    spawn_offset_y = half_h * 3
+    spawn_offset_x = half_w * 12
+    spawn_offset_y = half_h * 12
 
     if missile_type == "STATIONARY_RADAR":
         spawn_x, spawn_y = aaa_position
@@ -935,6 +947,19 @@ def spawn_missile(missile_type):
         else:
             spawn_x = plane_x - spawn_offset_x
             spawn_y = plane_y + random.randint(-int(spawn_offset_y), int(spawn_offset_y))
+
+    if missile_type == "STATIONARY_RADAR":
+        init_fuel = FOX1_FUEL
+        init_speed = FOX1_MISSILE_SPEED
+    elif missile_type == "RADAR":
+        init_fuel = FOX3_FUEL
+        init_speed = FOX3_MISSILE_SPEED
+    elif missile_type == "IR":
+        init_fuel = IR_FUEL
+        init_speed = IR_MISSILE_SPEED
+    else:
+        init_fuel = OPTICAL_FUEL
+        init_speed = OPTICAL_MISSILE_SPEED
 
     missiles.append({
         "type": missile_type,
@@ -957,7 +982,11 @@ def spawn_missile(missile_type):
         ),
         "lock_strength": 0.0,
         "is_decoyed": False,
-        "decoy_pos": [0, 0]
+        "decoy_pos": [0, 0],
+        "fuel": init_fuel,
+        "max_fuel": init_fuel,
+        "speed": init_speed,
+        "max_speed": init_speed
     })
 
 # =========================================================
@@ -1153,27 +1182,13 @@ while running:
 
     clock.tick(60)
 
-    # --- OPTIMIZATION: PRE-CALCULATE CAMERA CONSTANTS ---
-    inv_zoom = 1.0 / max(camera_zoom, 0.001)
-    view_w = (WIDTH * 0.5) * inv_zoom
-    view_h = (HEIGHT * 0.5) * inv_zoom
-    v_min_x, v_max_x = plane_x - view_w, plane_x + view_w
-    v_min_y, v_max_y = plane_y - view_h, plane_y + view_h
-    cam_ox = -plane_x * camera_zoom + WIDTH * 0.5
-    cam_oy = -plane_y * camera_zoom + HEIGHT * 0.5
-
-    fx_surface.fill((0, 0, 0, 0))
-    screen.fill(BG)
-
-    draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, cam_ox, cam_oy)
+    # =====================================================
+    # EVENTS
+    # =====================================================
 
     rwr_state = "NONE"
 
     lwr_warning = False
-
-    # =====================================================
-    # EVENTS
-    # =====================================================
 
     for event in pygame.event.get():
 
@@ -1225,15 +1240,29 @@ while running:
 
     keys = pygame.key.get_pressed()
 
-    if not paused:
+    # =====================================================
+    # CAMERA ZOOM (always computed first for frame-consistency)
+    # =====================================================
+    if keys[pygame.K_o]:
+        camera_zoom = max(MIN_ZOOM, camera_zoom / 1.03)
+    if keys[pygame.K_i]:
+        camera_zoom = min(MAX_ZOOM, camera_zoom * 1.03)
 
-        # =================================================
-        # CAMERA ZOOM (HOLDABLE)
-        # =================================================
-        if keys[pygame.K_o]:
-            camera_zoom = max(MIN_ZOOM, camera_zoom / 1.03)
-        if keys[pygame.K_i]:
-            camera_zoom = min(MAX_ZOOM, camera_zoom * 1.03)
+    # --- PRE-CALCULATE CAMERA CONSTANTS ---
+    inv_zoom = 1.0 / max(camera_zoom, 0.001)
+    view_w = (WIDTH * 0.5) * inv_zoom
+    view_h = (HEIGHT * 0.5) * inv_zoom
+    v_min_x, v_max_x = plane_x - view_w, plane_x + view_w
+    v_min_y, v_max_y = plane_y - view_h, plane_y + view_h
+    cam_ox = -plane_x * camera_zoom + WIDTH * 0.5
+    cam_oy = -plane_y * camera_zoom + HEIGHT * 0.5
+
+    fx_surface.fill((0, 0, 0, 0))
+    screen.fill(BG)
+
+    draw_environment(v_min_x, v_max_x, v_min_y, v_max_y, cam_ox, cam_oy)
+
+    if not paused:
 
         # =================================================
         # GROUND RADAR LOGIC
@@ -1245,7 +1274,7 @@ while running:
             dy = plane_y - aaa_position[1]
             dist = math.hypot(dx, dy)
             
-            if dist < RADAR_CONE_RANGE:
+            if dist < FOX1_RADAR_RANGE:
                 # Check for existing stationary radar missile specifically
                 stationary_active = any(m["type"] == "STATIONARY_RADAR" for m in missiles)
                 if not stationary_active and abs(ground_radar_sweep) < 0.25:
@@ -1668,8 +1697,9 @@ while running:
                 dy_gp = plane_y - source_y
                 dist_ground_to_plane_sq = dx_gp*dx_gp + dy_gp*dy_gp
                 dist_ground_to_plane = math.sqrt(dist_ground_to_plane_sq)
+                radar_range_sq = FOX1_RADAR_RANGE ** 2
                 
-                if player_in_cone and dist_ground_to_plane_sq < 25000000 and can_reacquire: # 5000^2
+                if player_in_cone and dist_ground_to_plane_sq < radar_range_sq and can_reacquire:
                     missile["is_decoyed"] = False
                     if aircraft_type == "JET":
                         pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
@@ -1683,18 +1713,45 @@ while running:
                     
                     missile["lock_strength"] = min(1.0, radial_vel / 10) #notch sensitivity, lower is harder to notch
                     target_x, target_y = plane_x, plane_y
+
+                    # Lead pursuit for SARH missile
+                    mdx = missile["x"] - plane_x
+                    mdy = missile["y"] - plane_y
+                    dist_m_to_p = math.sqrt(mdx*mdx + mdy*mdy)
+                    if dist_m_to_p > 0.001:
+                        pv_toward = (pvx * (-mdx) + pvy * (-mdy)) / dist_m_to_p
+                        closing = FOX1_MISSILE_SPEED - pv_toward
+                        t_intercept = min(dist_m_to_p / max(closing, 1.0), 180)
+                        target_lx = plane_x + pvx * t_intercept
+                        target_ly = plane_y + pvy * t_intercept
+                        vx = target_lx - missile["x"]
+                        vy = target_ly - missile["y"]
+                        dx = plane_x - missile["x"]
+                        dy = plane_y - missile["y"]
+                        if vx * dx + vy * dy < 0:
+                            target_lx = plane_x
+                            target_ly = plane_y
+                        if "lead_x" not in missile:
+                            missile["lead_x"] = target_lx
+                            missile["lead_y"] = target_ly
+                        else:
+                            missile["lead_x"] += (target_lx - missile["lead_x"]) * 0.2
+                            missile["lead_y"] += (target_ly - missile["lead_y"]) * 0.2
+
                 else:
                     if missile["is_decoyed"]:
                         target_x, target_y = missile["decoy_pos"]
                     missile["lock_strength"] = 0.0
+                    missile.pop("lead_x", None)
+                    missile.pop("lead_y", None)
 
                 # Seeker logic: check for chaff distraction within the beam
-                if dist_ground_to_plane_sq < 25000000:
+                if dist_ground_to_plane_sq < radar_range_sq:
                     for chaff in chaff_clouds:
                         # Radar cone check from ground source
                         dx_gc = chaff["x"] - source_x
                         dy_gc = chaff["y"] - source_y
-                        if dx_gc*dx_gc + dy_gc*dy_gc > 25000000:
+                        if dx_gc*dx_gc + dy_gc*dy_gc > radar_range_sq:
                             continue
                             
                         angle_to_chaff = math.atan2(chaff["y"] - source_y, chaff["x"] - source_x)
@@ -1766,19 +1823,27 @@ while running:
                 angle_to_player = math.atan2(plane_y - missile["y"], plane_x - missile["x"])
                 angle_diff = (angle_to_player - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
 
+                # Seeker gimbal: physical seeker head tracks within gimbal limits
+                gimbal_limit = math.radians(FOX3_GIMBAL_ANGLE / 2)
+                seeker_angle = missile["angle"] + max(-gimbal_limit, min(gimbal_limit, angle_diff))
+
                 # Active Radar seeker: Acquire in wide cone, track/re-acquire in narrow beam
                 player_in_acq_cone = abs(angle_diff) <= math.radians(FOX3_CONE_ANGLE / 2)
-                player_in_track_fov = abs(angle_diff) <= math.radians(FOX3_TRACK_FOV / 2)
-                can_see_player = player_in_track_fov if missile["is_decoyed"] else player_in_acq_cone
+                angle_to_player_from_seeker = (angle_to_player - seeker_angle + math.pi) % (math.pi * 2) - math.pi
+                player_in_track_fov = abs(angle_to_player_from_seeker) <= math.radians(FOX3_TRACK_FOV / 2)
+                player_in_gimbal = abs(angle_diff) <= gimbal_limit
+                can_see_player = player_in_gimbal and (player_in_track_fov if missile["is_decoyed"] else player_in_acq_cone)
                 
-                if can_see_player and dist_p_sq < 25000000 and can_reacquire: # 5000^2
+                # Compute target velocity for lead pursuit (unconditional for smooth updates)
+                if aircraft_type == "JET":
+                    pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
+                else:
+                    pvx, pvy = heli_velocity_x, heli_velocity_y
+                
+                if can_see_player and dist_p_sq < RADAR_CONE_RANGE ** 2 and can_reacquire: # detection range
                     missile["is_decoyed"] = False
                     # Calculate lock strength based on relative velocity (Closure Rate)
                     mvx, mvy = math.cos(missile["angle"]) * FOX3_MISSILE_SPEED, math.sin(missile["angle"]) * FOX3_MISSILE_SPEED
-                    if aircraft_type == "JET":
-                        pvx, pvy = math.cos(plane_angle) * plane_speed, math.sin(plane_angle) * plane_speed
-                    else:
-                        pvx, pvy = heli_velocity_x, heli_velocity_y
                     
                     rel_vel = math.hypot(pvx - mvx, pvy - mvy)
                     # 12.5 normalization factor makes the seeker twice as sensitive to closure rate
@@ -1790,17 +1855,47 @@ while running:
                     missile["lock_strength"] = 0.0
                     if missile["is_decoyed"]:
                         target_x, target_y = missile["decoy_pos"]
+                
+                # Lead pursuit: time-to-intercept based on closing speed
+                dist_to_target = math.sqrt(dist_p_sq)
+                # Plane velocity component toward/away from missile
+                pv_toward = (pvx * (-dx_p) + pvy * (-dy_p)) / (dist_to_target + 0.001)
+                closing = FOX3_MISSILE_SPEED - pv_toward  # positive when closing
+                t_intercept = min(dist_to_target / max(closing, 1.0), 180)
+                # Smooth gimbal margin: continuous function with no hard branch
+                angle_ratio = abs(angle_diff) / gimbal_limit
+                gimbal_margin = max(0.0, 1.0 - (angle_ratio ** 6))
+                lead_factor = t_intercept * gimbal_margin
+                # Target lead position based on current plane position (always smooth)
+                target_lx = plane_x + pvx * lead_factor
+                target_ly = plane_y + pvy * lead_factor
+                # Clamp lead to forward hemisphere so missile never aims behind itself
+                vx = target_lx - missile["x"]
+                vy = target_ly - missile["y"]
+                dx = plane_x - missile["x"]
+                dy = plane_y - missile["y"]
+                if vx * dx + vy * dy < 0:
+                    target_lx = plane_x
+                    target_ly = plane_y
+                # Smooth the lead via exponential filter to prevent snap/oscillation
+                if "lead_x" not in missile:
+                    missile["lead_x"] = target_lx
+                    missile["lead_y"] = target_ly
+                else:
+                    lead_filter = 0.2
+                    missile["lead_x"] += (target_lx - missile["lead_x"]) * lead_filter
+                    missile["lead_y"] += (target_ly - missile["lead_y"]) * lead_filter
 
                 # Seeker logic: check for chaff distraction
                 for chaff in chaff_clouds:
                     dx_mc = chaff["x"] - missile["x"]
                     dy_mc = chaff["y"] - missile["y"]
                     dist_mc_sq = dx_mc*dx_mc + dy_mc*dy_mc
-                    if dist_mc_sq > 25000000: # 5000^2
+                    if dist_mc_sq > RADAR_CONE_RANGE ** 2: # detection range
                         continue
                         
                     angle_to_chaff = math.atan2(chaff["y"] - missile["y"], chaff["x"] - missile["x"])
-                    angle_diff_chaff = (angle_to_chaff - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
+                    angle_diff_chaff = (angle_to_chaff - seeker_angle + math.pi) % (math.pi * 2) - math.pi
 
                     # Seeker distracted only by chaff within the narrow track beam
                     if abs(angle_diff_chaff) <= math.radians(FOX3_TRACK_FOV / 2):
@@ -1856,8 +1951,7 @@ while running:
                 missile_speed = OPTICAL_MISSILE_SPEED
                 turn_rate = OPTICAL_TURN_RATE
 
-            # Radar missiles track instantly; others have sensor lag
-            track_response = 1.0 if "RADAR" in missile["type"] else 0.10
+            track_response = 1.0
             missile["track_x"] += (
                 target_x
                 - missile["track_x"]
@@ -1868,15 +1962,26 @@ while running:
                 - missile["track_y"]
             ) * track_response
 
-            dx = (
-                missile["track_x"]
-                - missile["x"]
-            )
+            # Use per-missile speed (affected by fuel and turn bleed)
+            missile_speed = missile["speed"]
+            # Scale turn rate by speed ratio (slower missile = less agile)
+            speed_ratio = missile["speed"] / missile["max_speed"]
+            turn_rate *= speed_ratio
 
-            dy = (
-                missile["track_y"]
-                - missile["y"]
-            )
+            # Lead pursuit for FOX-3: steer toward predicted intercept point
+            if missile["type"] in ("RADAR", "STATIONARY_RADAR") and "lead_x" in missile and not missile["is_decoyed"]:
+                dx = missile["lead_x"] - missile["x"]
+                dy = missile["lead_y"] - missile["y"]
+            else:
+                dx = (
+                    missile["track_x"]
+                    - missile["x"]
+                )
+
+                dy = (
+                    missile["track_y"]
+                    - missile["y"]
+                )
 
             desired_angle = math.atan2(
                 dy,
@@ -1912,6 +2017,19 @@ while running:
                 * missile_speed
             )
 
+            # Fuel burn: base burn + extra for turning
+            fuel_burn = 1.0 + abs(angle_diff) * 10
+            missile["fuel"] = max(0, missile["fuel"] - fuel_burn)
+
+            if missile["fuel"] > 0:
+                # Motor compensates for turn drag — no speed bleed while burning
+                pass
+            else:
+                # Coasting: speed bleed from turning and gradual drag
+                bleed = abs(angle_diff) * missile_speed * 0.3
+                missile["speed"] = max(missile_speed - bleed, missile_speed * 0.95)
+                missile["speed"] = max(missile["speed"] * 0.998, 0.5)
+
             missile["trail"].append(
                 (
                     missile["x"],
@@ -1921,6 +2039,20 @@ while running:
 
             if len(missile["trail"]) > 100:
                 missile["trail"].pop(0)
+
+            # Self-destruct: no fuel and can no longer catch the target
+            if missile["fuel"] <= 0:
+                if aircraft_type == "JET":
+                    plane_spd = plane_speed
+                else:
+                    plane_spd = math.hypot(heli_velocity_x, heli_velocity_y)
+                if missile["speed"] <= plane_spd * 0.95:
+                    m_dx = missile["x"] - plane_x
+                    m_dy = missile["y"] - plane_y
+                    if m_dx*m_dx + m_dy*m_dy > 45*45:
+                        create_explosion(missile["x"], missile["y"], GREY, radius=8)
+                        missiles_to_remove.append(missile)
+                        continue
 
             distance = math.hypot(dx, dy)
 
@@ -2270,6 +2402,12 @@ while running:
             6
         )
 
+        # Draw yellow lead dot for FOX-3 missiles in lead pursuit
+        if missile["type"] in ("RADAR", "STATIONARY_RADAR") and "lead_x" in missile and not missile["is_decoyed"]:
+            lx = int(missile["lead_x"] * camera_zoom + cam_ox)
+            ly = int(missile["lead_y"] * camera_zoom + cam_oy)
+            pygame.draw.circle(screen, YELLOW, (lx, ly), 4)
+
     # =====================================================
     # DRAW BOFORS
     # =====================================================
@@ -2335,9 +2473,23 @@ while running:
                 msx,
                 msy,
                 missile["angle"],
-                missile["type"],
-                scale=camera_zoom
+                missile["type"]
             )
+
+            # Fuel bar under missile
+            bar_w = 30
+            bar_h = 4
+            bar_x = msx - bar_w // 2
+            bar_y = msy + 14
+            fuel_ratio = missile["fuel"] / missile["max_fuel"]
+            fuel_color = (int(255 * (1 - fuel_ratio)), int(255 * fuel_ratio), 0)
+            pygame.draw.rect(screen, (60, 60, 60), (bar_x, bar_y, bar_w, bar_h))
+            pygame.draw.rect(screen, fuel_color, (bar_x, bar_y, int(bar_w * fuel_ratio), bar_h))
+
+            # Speed text above missile
+            speed_kt = int(missile["speed"] * 66.6)
+            spd_txt = font_small.render(str(speed_kt), True, (200, 220, 255))
+            screen.blit(spd_txt, (msx - spd_txt.get_width() // 2, msy - 22))
 
     # =====================================================
     # DRAW RADAR MISSILE SEEKER CONES
@@ -2346,9 +2498,7 @@ while running:
     # Check if a ground-based radar missile is already in the air
     stationary_radar_active = any(m["type"] == "STATIONARY_RADAR" for m in missiles)
     
-    # Optimization: Calculate a visual range that doesn't exceed screen needs
-    max_view_dist = (max(WIDTH, HEIGHT) / max(0.1, camera_zoom)) * 1.2
-    v_cone_range = min(RADAR_CONE_RANGE, max_view_dist)
+    v_cone_range = RADAR_CONE_RANGE
 
     if ground_radar_enabled and not stationary_radar_active:
         ax, ay = aaa_position
@@ -2365,8 +2515,8 @@ while running:
         segments = 10
         for i in range(segments + 1):
             ang = (angle_to_player - half_cone) + (half_cone * 2 * (i / segments))
-            px = int((ax + math.cos(ang) * v_cone_range) * camera_zoom + cam_ox)
-            py = int((ay + math.sin(ang) * v_cone_range) * camera_zoom + cam_oy)
+            px = int((ax + math.cos(ang) * FOX1_RADAR_RANGE) * camera_zoom + cam_ox)
+            py = int((ay + math.sin(ang) * FOX1_RADAR_RANGE) * camera_zoom + cam_oy)
             cone_pts.append((px, py))
         
         alpha = 30 + int(ground_radar_lock * 50)
@@ -2374,8 +2524,8 @@ while running:
         
         # Draw Scanning Line
         sweep_ang = angle_to_player + ground_radar_sweep * half_cone
-        lx = int((ax + math.cos(sweep_ang) * v_cone_range) * camera_zoom + cam_ox)
-        ly = int((ay + math.sin(sweep_ang) * v_cone_range) * camera_zoom + cam_oy)
+        lx = int((ax + math.cos(sweep_ang) * FOX1_RADAR_RANGE) * camera_zoom + cam_ox)
+        ly = int((ay + math.sin(sweep_ang) * FOX1_RADAR_RANGE) * camera_zoom + cam_oy)
         pygame.draw.line(fx_surface, (0, 255, 120, 220), (sx, sy), (lx, ly), 2)
 
     for missile in missiles:
@@ -2394,31 +2544,49 @@ while running:
                 msy = int(source_y * camera_zoom + cam_oy)
                 ref_angle = math.atan2(missile["track_y"] - source_y, missile["track_x"] - source_x)
             else:
-                # FOX 3: Show wide acquisition limit and narrow track beam
+                # FOX 3: Show gimbal limits and track beam
                 msx = int(missile["x"] * camera_zoom + cam_ox)
                 msy = int(missile["y"] * camera_zoom + cam_oy)
                 ref_angle = missile["angle"]
                 
-                # Draw Wide Acquisition Cone (Transparent)
-                if camera_zoom > 0.4: # Skip extra detail if zoomed out far
-                    w_half = math.radians(FOX3_CONE_ANGLE / 2)
-                    w_pts = [(msx, msy)]
-                    for i in range(7):
-                        a = (ref_angle - w_half) + (w_half * 2 * (i / 6))
-                        w_pts.append((int((missile["x"] + math.cos(a) * v_cone_range) * camera_zoom + cam_ox),
-                                     int((missile["y"] + math.sin(a) * v_cone_range) * camera_zoom + cam_oy)))
-                    pygame.draw.polygon(fx_surface, (0, 100, 255, 15), w_pts)
+                # Draw Gimbal Cone (Physical seeker tracking limit) — outline only
+                g_half = math.radians(FOX3_GIMBAL_ANGLE / 2)
+                g_end_l = int((missile["x"] + math.cos(ref_angle - g_half) * v_cone_range) * camera_zoom + cam_ox), \
+                          int((missile["y"] + math.sin(ref_angle - g_half) * v_cone_range) * camera_zoom + cam_oy)
+                g_end_r = int((missile["x"] + math.cos(ref_angle + g_half) * v_cone_range) * camera_zoom + cam_ox), \
+                          int((missile["y"] + math.sin(ref_angle + g_half) * v_cone_range) * camera_zoom + cam_oy)
+                ls = missile.get("lock_strength", 0)
+                gimbal_alpha = int(120 + ls * 80)
+                gimbal_color = (0, 200, 80, gimbal_alpha)
+                pygame.draw.line(fx_surface, gimbal_color, (msx, msy), g_end_l, 1)
+                pygame.draw.line(fx_surface, gimbal_color, (msx, msy), g_end_r, 1)
+                # Arc at the far end
+                arc_pts = []
+                for i in range(5):
+                    a = (ref_angle - g_half) + (g_half * 2 * (i / 4))
+                    arc_pts.append((int((missile["x"] + math.cos(a) * v_cone_range) * camera_zoom + cam_ox),
+                                    int((missile["y"] + math.sin(a) * v_cone_range) * camera_zoom + cam_oy)))
+                pygame.draw.lines(fx_surface, gimbal_color, False, arc_pts, 1)
+                
+                # Track FOV cone follows the seeker gimbal angle, clamped within gimbal limits
+                dx_t = missile["track_x"] - missile["x"]
+                dy_t = missile["track_y"] - missile["y"]
+                angle_to_track = math.atan2(dy_t, dx_t)
+                angle_diff_track = (angle_to_track - missile["angle"] + math.pi) % (math.pi * 2) - math.pi
+                track_seeker_angle = missile["angle"] + max(-g_half, min(g_half, angle_diff_track))
                 
                 cone_angle_rad = math.radians(FOX3_TRACK_FOV / 2)
+                ref_angle = track_seeker_angle
 
+            cone_range = FOX1_RADAR_RANGE if missile["type"] == "STATIONARY_RADAR" else v_cone_range
             points = [(msx, msy)]
             segments = 6
             for i in range(segments + 1):
                 step_angle = (ref_angle - cone_angle_rad) + (cone_angle_rad * 2 * (i / segments))
                 origin_x = aaa_position[0] if missile["type"] == "STATIONARY_RADAR" else missile["x"]
                 origin_y = aaa_position[1] if missile["type"] == "STATIONARY_RADAR" else missile["y"]
-                spx = int((origin_x + math.cos(step_angle) * v_cone_range) * camera_zoom + cam_ox)
-                spy = int((origin_y + math.sin(step_angle) * v_cone_range) * camera_zoom + cam_oy)
+                spx = int((origin_x + math.cos(step_angle) * cone_range) * camera_zoom + cam_ox)
+                spy = int((origin_y + math.sin(step_angle) * cone_range) * camera_zoom + cam_oy)
                 points.append((spx, spy))
 
             ls = missile.get("lock_strength", 0)
