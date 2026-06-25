@@ -129,6 +129,16 @@ prev_radar_sweep = 0.0
 radar_dots = []
 radar_cursor_angle = 0.0
 radar_cursor_dist = 0.5
+radar_locked = False
+prev_lock_sweep_val = 0.0
+lock_sweep_val = 0.0
+radar_lock_until = 0
+radar_lock_hit = False
+radar_hit_lock = False
+radar_mode = "SEARCH"
+prev_rel_angle = 0.0
+lock_world_x = 0.0
+lock_world_y = 0.0
 
 # endregion
 
@@ -174,7 +184,7 @@ turn_speed = 0.0225
 
 camera_zoom = 1.0
 MIN_ZOOM = 0.085
-MAX_ZOOM = 3.2
+MAX_ZOOM = 4.8
 ZOOM_STEP = 1.20 #1.08
 GRASS_SPAWN_MIN_X = -12000
 GRASS_SPAWN_MAX_X = 12000
@@ -202,7 +212,7 @@ heli_velocity_y = 0
 
 ENEMY_ORBIT_RADIUS = 800
 enemy_cx = 300
-enemy_cy = -2000
+enemy_cy = -6000
 enemy_orbit_angle = 0
 enemy_x = enemy_cx + ENEMY_ORBIT_RADIUS
 enemy_y = enemy_cy
@@ -1044,6 +1054,26 @@ def spawn_missile(missile_type):
         "max_speed": init_speed
     })
 
+def fire_player_fox1():
+    radar_launch_sound.play()
+    angle = math.atan2(lock_world_y - plane_y, lock_world_x - plane_x)
+    missiles.append({
+        "type": "PLAYER_FOX1",
+        "x": plane_x, "y": plane_y,
+        "angle": angle,
+        "vx": math.cos(angle) * FOX1_MISSILE_SPEED,
+        "vy": math.sin(angle) * FOX1_MISSILE_SPEED,
+        "track_x": lock_world_x, "track_y": lock_world_y,
+        "trail": [],
+        "fuel": FOX1_FUEL,
+        "max_fuel": FOX1_FUEL,
+        "speed": FOX1_MISSILE_SPEED,
+        "max_speed": FOX1_MISSILE_SPEED,
+        "is_decoyed": False,
+        "decoy_pos": [0, 0],
+        "lock_strength": 0.0
+    })
+
 # =========================================================
 # FLARES
 # =========================================================
@@ -1292,6 +1322,9 @@ while running:
                 radar_launch_sound.play()
                 spawn_missile("RADAR")
 
+            if event.key == pygame.K_SPACE and radar_locked:
+                fire_player_fox1()
+
             if event.key == pygame.K_z:
                 aaa_enabled = not aaa_enabled
 
@@ -1307,14 +1340,34 @@ while running:
                     enemy_state = "ORBIT"
 
             if event.key == pygame.K_r:
-                radar_enabled = not radar_enabled
+                if event.mod & (pygame.KMOD_LALT | pygame.KMOD_RALT):
+                    radar_enabled = not radar_enabled
+                    if not radar_enabled:
+                        radar_locked = False
+                else:
+                    radar_mode = "HMD" if radar_mode == "SEARCH" else "SEARCH"
+                    if radar_mode == "HMD":
+                        radar_locked = False
+
+            if event.key == pygame.K_f and (
+                event.mod & pygame.KMOD_LALT
+                or event.mod & pygame.KMOD_RALT
+            ):
+                radar_locked = not radar_locked
+                if radar_locked:
+                    mode_range = 12000 if radar_mode == "SEARCH" else (6000 if radar_mode == "HMD" else 4000)
+                    lock_dist = 500 + radar_cursor_dist * max(1, mode_range - 500)
+                    lock_world_x = plane_x + math.cos(plane_angle + radar_cursor_angle * math.radians(45)) * lock_dist
+                    lock_world_y = plane_y + math.sin(plane_angle + radar_cursor_angle * math.radians(45)) * lock_dist
+                radar_lock_until = pygame.time.get_ticks() + 500
+                radar_hit_lock = False
 
 
     keys = pygame.key.get_pressed()
     alt_held = keys[pygame.K_LALT] or keys[pygame.K_RALT]
 
     # radar cursor control
-    if radar_enabled and alt_held:
+    if radar_enabled and alt_held and not radar_locked:
         if keys[pygame.K_a]:
             radar_cursor_angle -= 0.02
         if keys[pygame.K_d]:
@@ -1354,6 +1407,26 @@ while running:
         # =================================================
         prev_radar_sweep = radar_sweep
         radar_sweep = math.sin(pygame.time.get_ticks() * 0.003)
+        # lock timer — expires 500ms after last detection
+        if radar_locked and pygame.time.get_ticks() > radar_lock_until:
+            radar_locked = False
+        radar_lock_hit = False
+        prev_lock_sweep_val = lock_sweep_val
+        # recompute radar_cursor from lock world position (aircraft-independent)
+        if radar_locked:
+            dx_lock = lock_world_x - plane_x
+            dy_lock = lock_world_y - plane_y
+            lock_dist = math.hypot(dx_lock, dy_lock)
+            lock_ang = math.atan2(dy_lock, dx_lock) - plane_angle
+            while lock_ang > math.pi:
+                lock_ang -= 2 * math.pi
+            while lock_ang < -math.pi:
+                lock_ang += 2 * math.pi
+            radar_cursor_angle = lock_ang / math.radians(45)
+            radar_cursor_dist = max(0.1, min(1.0, (lock_dist - 500) / max(1, (12000 if (radar_mode == "SEARCH" or radar_locked) else (6000 if radar_mode == "HMD" else 4000)) - 500)))
+        lock_half_frac = math.radians(7.5) / math.radians(45)
+        speed_factor = math.radians(45) / math.radians(7.5)
+        lock_sweep_val = radar_cursor_angle + math.sin(pygame.time.get_ticks() * 0.003 * speed_factor) * lock_half_frac
         if ground_radar_enabled:
             ground_radar_sweep = radar_sweep
             
@@ -1412,7 +1485,7 @@ while running:
         # FIRE GUN 
         # =================================================
 
-        if keys[pygame.K_f]:
+        if keys[pygame.K_f] and not alt_held:
  
              fire_gun()
 
@@ -1421,9 +1494,7 @@ while running:
         # =================================================
 
         if result_timer > 0:
-
             result_timer -= 1
-
             if result_timer <= 0:
                 result_text = ""
 
@@ -2076,6 +2147,71 @@ while running:
                 missile_speed = FOX1_MISSILE_SPEED
                 turn_rate = FOX1_TURN_RATE
 
+            elif missile["type"] == "PLAYER_FOX1":
+                target_x = lock_world_x if radar_locked else missile["track_x"]
+                target_y = lock_world_y if radar_locked else missile["track_y"]
+                if radar_locked and not missile["is_decoyed"]:
+                    # Ping detection for time-corrected velocity
+                    if target_x != missile.get("last_ping_x") or target_y != missile.get("last_ping_y"):
+                        if "last_ping_x" in missile:
+                            now = pygame.time.get_ticks()
+                            dt_ms = max(1, now - missile.get("last_ping_ms", now))
+                            dt_frame = dt_ms / 16.667
+                            dx = target_x - missile["last_ping_x"]
+                            dy = target_y - missile["last_ping_y"]
+                            raw_lvx = dx / max(dt_frame, 1.0)
+                            raw_lvy = dy / max(dt_frame, 1.0)
+                            missile["lvx"] = raw_lvx * 0.5 + missile.get("lvx", raw_lvx) * 0.5
+                            missile["lvy"] = raw_lvy * 0.5 + missile.get("lvy", raw_lvy) * 0.5
+                            missile["last_ping_ms"] = now
+                            missile["ping_count"] = missile.get("ping_count", 0) + 1
+                        else:
+                            missile["last_ping_ms"] = pygame.time.get_ticks()
+                        missile["last_ping_x"] = target_x
+                        missile["last_ping_y"] = target_y
+                    # Lead pursuit with gradual introduction
+                    lead_weight = min(1.0, missile.get("ping_count", 0) / 3)
+                    lvx = missile.get("lvx", 0) * lead_weight
+                    lvy = missile.get("lvy", 0) * lead_weight
+                    dx_p = target_x - missile["x"]
+                    dy_p = target_y - missile["y"]
+                    dist_to_target = math.hypot(dx_p, dy_p)
+                    if dist_to_target > 0.001:
+                        pv_toward = (lvx * (-dx_p) + lvy * (-dy_p)) / dist_to_target
+                        closing = FOX1_MISSILE_SPEED - pv_toward
+                        t_intercept = min(dist_to_target / max(closing, 1.0), 180)
+                        target_lx = target_x + lvx * t_intercept
+                        target_ly = target_y + lvy * t_intercept
+                        # Clamp lead distance to 50% of target distance
+                        lead_dx = target_lx - target_x
+                        lead_dy = target_ly - target_y
+                        lead_dist = math.hypot(lead_dx, lead_dy)
+                        max_lead = dist_to_target * 0.5
+                        if lead_dist > max_lead:
+                            target_lx = target_x + lead_dx / lead_dist * max_lead
+                            target_ly = target_y + lead_dy / lead_dist * max_lead
+                        # Clamp to forward hemisphere
+                        vx = target_lx - missile["x"]
+                        vy = target_ly - missile["y"]
+                        if vx * dx_p + vy * dy_p < 0:
+                            target_lx = target_x
+                            target_ly = target_y
+                        if "lead_x" not in missile:
+                            missile["lead_x"] = target_lx
+                            missile["lead_y"] = target_ly
+                        else:
+                            missile["lead_x"] += (target_lx - missile["lead_x"]) * 0.2
+                            missile["lead_y"] += (target_ly - missile["lead_y"]) * 0.2
+                else:
+                    missile.pop("lead_x", None)
+                    missile.pop("lead_y", None)
+                    missile.pop("lvx", None)
+                    missile.pop("lvy", None)
+                    missile.pop("last_ping_x", None)
+                    missile.pop("last_ping_y", None)
+                missile_speed = FOX1_MISSILE_SPEED
+                turn_rate = FOX1_TURN_RATE
+
             elif missile["type"] == "RADAR":
 
                 chaff_targeted = False
@@ -2275,7 +2411,7 @@ while running:
             turn_rate *= speed_ratio
 
             # Lead pursuit: steer toward predicted intercept point
-            if missile["type"] in ("RADAR", "STATIONARY_RADAR", "IR") and "lead_x" in missile and not missile["is_decoyed"]:
+            if missile["type"] in ("RADAR", "STATIONARY_RADAR", "IR", "PLAYER_FOX1") and "lead_x" in missile and not missile["is_decoyed"]:
                 dx = missile["lead_x"] - missile["x"]
                 dy = missile["lead_y"] - missile["y"]
             else:
@@ -2448,25 +2584,42 @@ while running:
 
                 if not countermeasure_hit:
                     lethal_radius = 150
-                    dx_p = missile["x"] - plane_x
-                    dy_p = missile["y"] - plane_y
-                    # Optimized proximity check using squared distance
-                    if (dx_p*dx_p + dy_p*dy_p) < (lethal_radius * lethal_radius):
-                        # Player caught in proximity fuse
-                        create_explosion(missile["x"], missile["y"], RED, radius=int(lethal_radius))
-                        create_explosion(plane_x, plane_y, RED, radius=10)
-                        
-                        result_text = f"{missile['type']} MISSILE HIT"
-                        result_timer = RESULT_DISPLAY_TIME
-                        reset_plane()
+                    if missile["type"] == "PLAYER_FOX1":
+                        dx_me = missile["x"] - enemy_x
+                        dy_me = missile["y"] - enemy_y
+                        if (dx_me*dx_me + dy_me*dy_me) < (lethal_radius * lethal_radius):
+                            create_explosion(missile["x"], missile["y"], RED, radius=int(lethal_radius))
+                            create_explosion(enemy_x, enemy_y, RED, radius=80)
+                            result_text = "TARGET DESTROYED"
+                            result_timer = RESULT_DISPLAY_TIME
+                            enemy_health = enemy_max_health
+                            enemy_speed = 0.0
+                            enemy_throttle = 0.0
+                            enemy_heading = math.pi * 0.5
+                            enemy_x = enemy_cx + ENEMY_ORBIT_RADIUS
+                            enemy_y = enemy_cy
+                        else:
+                            create_explosion(missile["x"], missile["y"], GREY, radius=8)
                     else:
-                        # Missile detonated safely (Visualizing the miss)
-                        create_explosion(
-                            missile["x"], 
-                            missile["y"], 
-                            GREY, 
-                            radius=int(lethal_radius)
-                        )
+                        dx_p = missile["x"] - plane_x
+                        dy_p = missile["y"] - plane_y
+                        # Optimized proximity check using squared distance
+                        if (dx_p*dx_p + dy_p*dy_p) < (lethal_radius * lethal_radius):
+                            # Player caught in proximity fuse
+                            create_explosion(missile["x"], missile["y"], RED, radius=int(lethal_radius))
+                            create_explosion(plane_x, plane_y, RED, radius=10)
+                            
+                            result_text = f"{missile['type']} MISSILE HIT"
+                            result_timer = RESULT_DISPLAY_TIME
+                            reset_plane()
+                        else:
+                            # Missile detonated safely (Visualizing the miss)
+                            create_explosion(
+                                missile["x"], 
+                                missile["y"], 
+                                GREY, 
+                                radius=int(lethal_radius)
+                            )
 
                 missiles_to_remove.append(
                     missile
@@ -2548,13 +2701,10 @@ while running:
             dy_be = bullet["y"] - enemy_y
             if (dx_be*dx_be + dy_be*dy_be) < 3600:
                 bullets.remove(bullet)
-                enemy_health -= 10
-                damage_pct = 1.0 - (enemy_health / enemy_max_health)
-                explosion_radius = int(10 + damage_pct * 80)
-                result_text = "HIT"
-                result_timer = RESULT_DISPLAY_TIME
-                create_explosion(enemy_x, enemy_y, RED, radius=explosion_radius)
+                enemy_health -= 20
                 if enemy_health <= 0:
+                    result_text = "TARGET DESTROYED"
+                    result_timer = RESULT_DISPLAY_TIME
                     create_explosion(enemy_x, enemy_y, RED, radius=80)
                     enemy_health = enemy_max_health
                     enemy_speed = 0.0
@@ -2562,6 +2712,13 @@ while running:
                     enemy_heading = math.pi * 0.5
                     enemy_x = enemy_cx + ENEMY_ORBIT_RADIUS
                     enemy_y = enemy_cy
+                else:
+                    damage_pct = 1.0 - (enemy_health / enemy_max_health)
+                    explosion_radius = int(10 + damage_pct * 80)
+                    if result_text != "TARGET DESTROYED":
+                        result_text = "HIT"
+                        result_timer = RESULT_DISPLAY_TIME
+                    create_explosion(enemy_x, enemy_y, RED, radius=explosion_radius)
 
         # enemy bullets update
         for b in enemy_bullets:
@@ -2778,7 +2935,7 @@ while running:
         )
 
         # Draw yellow lead dot for missiles in lead pursuit
-        if missile["type"] in ("RADAR", "STATIONARY_RADAR", "IR") and "lead_x" in missile and not missile["is_decoyed"]:
+        if missile["type"] in ("RADAR", "STATIONARY_RADAR", "IR", "PLAYER_FOX1") and "lead_x" in missile and not missile["is_decoyed"]:
             lx = int(missile["lead_x"] * camera_zoom + cam_ox)
             ly = int(missile["lead_y"] * camera_zoom + cam_oy)
             pygame.draw.circle(screen, YELLOW, (lx, ly), 4)
@@ -2909,11 +3066,39 @@ while running:
     jet_turn = applied_turn if aircraft_type == "JET" else 0
     draw_plane(plane_x, plane_y, plane_angle, jet_turn if not paused else 0)
 
+    # compute HMD screen pos once (before both cone drawing and UI detection)
+    hmd_scr_x = None
+    hmd_scr_y = None
+    hmd_half_draw = 120
+    if radar_enabled and radar_mode == "HMD":
+        hmx_raw, hmy_raw = pygame.mouse.get_pos()
+        hmwx = (hmx_raw - WIDTH * 0.5) / camera_zoom + plane_x
+        hmwy = (hmy_raw - HEIGHT * 0.5) / camera_zoom + plane_y
+        hmd_dmx = hmwx - plane_x
+        hmd_dmy = hmwy - plane_y
+        hmd_mdist = math.hypot(hmd_dmx, hmd_dmy)
+        hmd_rel_ang = math.atan2(hmd_dmy, hmd_dmx) - plane_angle
+        half_angle = math.radians(45)
+        cone_range = 6000
+        while hmd_rel_ang > math.pi:
+            hmd_rel_ang -= 2 * math.pi
+        while hmd_rel_ang < -math.pi:
+            hmd_rel_ang += 2 * math.pi
+        hmd_rel_ang = max(-half_angle, min(half_angle, hmd_rel_ang))
+        hmd_mdist = max(0, min(cone_range, hmd_mdist))
+        clamped_wx = plane_x + math.cos(plane_angle + hmd_rel_ang) * hmd_mdist
+        clamped_wy = plane_y + math.sin(plane_angle + hmd_rel_ang) * hmd_mdist
+        hmd_scr_x, hmd_scr_y = world_to_screen(clamped_wx, clamped_wy)
+        hmd_half_draw = int(120 * camera_zoom)
+
     # Player radar cone
     if radar_enabled:
-        cone_range = 4000
-        half_angle = math.radians(45)
         psx, psy = world_to_screen(plane_x, plane_y)
+        half_angle = math.radians(45)
+        cone_range = 12000 if (radar_mode == "SEARCH" or radar_locked) else (6000 if radar_mode == "HMD" else 4000)
+        sweep_ang = plane_angle + radar_sweep * half_angle
+
+        # draw full cone outline
         pts = [(psx, psy)]
         segments = 12
         for i in range(segments + 1):
@@ -2923,10 +3108,52 @@ while running:
             pts.append((px, py))
         pygame.draw.polygon(screen, GREEN, pts, 2)
 
-        sweep_ang = plane_angle + radar_sweep * half_angle
-        lx = psx + math.cos(sweep_ang) * cone_range * camera_zoom
-        ly = psy + math.sin(sweep_ang) * cone_range * camera_zoom
-        pygame.draw.line(screen, (0, 255, 120), (psx, psy), (lx, ly), 2)
+        if radar_locked:
+            narrow_half = math.radians(7.5)
+            cursor_world_ang = math.atan2(lock_world_y - plane_y, lock_world_x - plane_x)
+            cursor_world_dist = math.hypot(lock_world_x - plane_x, lock_world_y - plane_y)
+            # clamp lock box to radar cone
+            lock_rel = cursor_world_ang - plane_angle
+            while lock_rel > math.pi:
+                lock_rel -= 2 * math.pi
+            while lock_rel < -math.pi:
+                lock_rel += 2 * math.pi
+            if abs(lock_rel) <= half_angle - narrow_half:
+                half_depth = cursor_world_dist * 0.125
+                near_dist = max(500, cursor_world_dist - half_depth)
+                far_dist = cursor_world_dist + half_depth
+
+                box_pts = []
+                left_ang = cursor_world_ang - narrow_half
+                right_ang = cursor_world_ang + narrow_half
+                for ang in (left_ang, right_ang):
+                    px = psx + math.cos(ang) * near_dist * camera_zoom
+                    py = psy + math.sin(ang) * near_dist * camera_zoom
+                    box_pts.append((px, py))
+                for ang in (right_ang, left_ang):
+                    px = psx + math.cos(ang) * far_dist * camera_zoom
+                    py = psy + math.sin(ang) * far_dist * camera_zoom
+                    box_pts.append((px, py))
+                pygame.draw.polygon(screen, GREEN, box_pts, 2)
+                cx = psx + math.cos(cursor_world_ang) * cursor_world_dist * camera_zoom
+                cy = psy + math.sin(cursor_world_ang) * cursor_world_dist * camera_zoom
+                s = 8
+                pygame.draw.rect(screen, GREEN, (cx - s, cy - s, s * 2, s * 2), 2)
+
+                speed_factor = half_angle / narrow_half
+                fast_sweep = math.sin(pygame.time.get_ticks() * 0.003 * speed_factor)
+                sweep_lock_ang = cursor_world_ang + fast_sweep * narrow_half
+                lx = psx + math.cos(sweep_lock_ang) * far_dist * camera_zoom
+                ly = psy + math.sin(sweep_lock_ang) * far_dist * camera_zoom
+                pygame.draw.line(screen, (0, 255, 120), (psx, psy), (lx, ly), 2)
+        elif radar_mode == "HMD":
+            # HMD box on screen (scales with zoom)
+            if hmd_scr_x is not None:
+                pygame.draw.rect(screen, GREEN, (hmd_scr_x - hmd_half_draw, hmd_scr_y - hmd_half_draw, hmd_half_draw * 2, hmd_half_draw * 2), 2)
+        else:
+            lx = psx + math.cos(sweep_ang) * cone_range * camera_zoom
+            ly = psy + math.sin(sweep_ang) * cone_range * camera_zoom
+            pygame.draw.line(screen, (0, 255, 120), (psx, psy), (lx, ly), 2)
 
     # Draw enemy aircraft
     enemy_zoom = MIN_ZOOM * 1.5 if camera_zoom <= MIN_ZOOM * 1.01 else camera_zoom
@@ -3167,9 +3394,42 @@ while running:
         ay = HEIGHT // 2 + 150
         radius = 248
         half_angle = math.radians(45)
-        cone_range = 4000
+        cone_range = 12000 if (radar_mode == "SEARCH" or radar_locked) else (6000 if radar_mode == "HMD" else 4000)
 
-        # detect sweep crossing enemy
+        # compute HMD cursor values for detection (uses precomputed screen pos)
+        if radar_mode == "HMD" and hmd_scr_x is not None:
+            hmx, hmy = hmd_scr_x, hmd_scr_y
+            # recompute world dist/angle from the projected clamped position
+            hmwx = (hmx - WIDTH * 0.5) / camera_zoom + plane_x
+            hmwy = (hmy - HEIGHT * 0.5) / camera_zoom + plane_y
+            hmd_dmx = hmwx - plane_x
+            hmd_dmy = hmwy - plane_y
+            hmd_mdist = math.hypot(hmd_dmx, hmd_dmy)
+            hmd_rel_ang = math.atan2(hmd_dmy, hmd_dmx) - plane_angle
+            while hmd_rel_ang > math.pi:
+                hmd_rel_ang -= 2 * math.pi
+            while hmd_rel_ang < -math.pi:
+                hmd_rel_ang += 2 * math.pi
+            hmd_cursor_angle = max(-1.0, min(1.0, hmd_rel_ang / half_angle))
+            hmd_cursor_dist = max(0.1, min(1.0, (hmd_mdist - 500) / max(1, cone_range - 500)))
+            hmd_half = hmd_half_draw
+        elif radar_mode == "HMD":
+            hmx, hmy = pygame.mouse.get_pos()
+            hmd_half = int(120 * camera_zoom)
+            hmwx = (hmx - WIDTH * 0.5) / camera_zoom + plane_x
+            hmwy = (hmy - HEIGHT * 0.5) / camera_zoom + plane_y
+            hmd_dmx = hmwx - plane_x
+            hmd_dmy = hmwy - plane_y
+            hmd_mdist = math.hypot(hmd_dmx, hmd_dmy)
+            hmd_rel_ang = math.atan2(hmd_dmy, hmd_dmx) - plane_angle
+            while hmd_rel_ang > math.pi:
+                hmd_rel_ang -= 2 * math.pi
+            while hmd_rel_ang < -math.pi:
+                hmd_rel_ang += 2 * math.pi
+            hmd_cursor_angle = max(-1.0, min(1.0, hmd_rel_ang / half_angle))
+            hmd_cursor_dist = max(0.1, min(1.0, (hmd_mdist - 500) / max(1, cone_range - 500)))
+
+        # detect enemy (sweep or HMD)
         dx_e = enemy_x - plane_x
         dy_e = enemy_y - plane_y
         dist_e = math.hypot(dx_e, dy_e)
@@ -3180,16 +3440,64 @@ while running:
                 rel_angle -= 2 * math.pi
             while rel_angle < -math.pi:
                 rel_angle += 2 * math.pi
-            if abs(rel_angle) < half_angle:
+            in_cone = abs(rel_angle) < half_angle
+            if radar_locked:
+                cursor_ang = math.atan2(lock_world_y - plane_y, lock_world_x - plane_x) - plane_angle
+                while cursor_ang > math.pi:
+                    cursor_ang -= 2 * math.pi
+                while cursor_ang < -math.pi:
+                    cursor_ang += 2 * math.pi
+                lock_half = math.radians(7.5)
+                cdist = math.hypot(lock_world_x - plane_x, lock_world_y - plane_y)
+                dh = cdist * 0.125
+                near_dist = max(500, cdist - dh)
+                far_dist = cdist + dh
+                in_cone = (abs(cursor_ang) < half_angle and
+                           abs(rel_angle - cursor_ang) < lock_half and
+                           near_dist <= dist_e <= far_dist)
+            elif radar_mode == "HMD":
+                esx, esy = world_to_screen(enemy_x, enemy_y)
+                in_cone = in_cone and abs(esx - hmx) < hmd_half and abs(esy - hmy) < hmd_half
+                if in_cone and not radar_locked:
+                    radar_locked = True
+                    lock_world_x = enemy_x
+                    lock_world_y = enemy_y
+                    radar_cursor_angle = hmd_cursor_angle
+                    radar_cursor_dist = hmd_cursor_dist
+                    radar_lock_until = pygame.time.get_ticks() + 500
+            if in_cone:
                 target_sweep = rel_angle / half_angle
-                if (prev_radar_sweep < target_sweep and radar_sweep >= target_sweep) or \
-                   (prev_radar_sweep > target_sweep and radar_sweep <= target_sweep):
+                if radar_locked:
+                    crossing = (prev_lock_sweep_val < target_sweep and lock_sweep_val >= target_sweep) or \
+                               (prev_lock_sweep_val > target_sweep and lock_sweep_val <= target_sweep)
+                elif radar_mode == "HMD":
+                    crossing = True
+                else:
+                    crossing = (prev_radar_sweep < prev_rel_angle / half_angle and radar_sweep >= prev_rel_angle / half_angle) or \
+                               (prev_radar_sweep > prev_rel_angle / half_angle and radar_sweep <= prev_rel_angle / half_angle)
+                if crossing:
                     now = pygame.time.get_ticks()
+                    if radar_mode == "HMD" and not radar_locked:
+                        # place dot at cursor position (centre of HMD box)
+                        dot_angle = -math.pi / 2 + hmd_rel_ang
+                        dot_dist = hmd_mdist
+                    else:
+                        dot_angle = -math.pi / 2 + rel_angle
+                        dot_dist = dist_e
                     radar_dots.append({
-                        "angle": -math.pi / 2 + rel_angle,
+                        "angle": dot_angle,
                         "time": now,
-                        "dist": dist_e
+                        "dist": dot_dist
                     })
+                    if radar_locked:
+                        lock_world_x = enemy_x
+                        lock_world_y = enemy_y
+                        radar_cursor_angle = max(-1.0, min(1.0, rel_angle / half_angle))
+                        radar_cursor_dist = max(0.1, min(1.0, (dist_e - 500) / max(1, cone_range - 500)))
+                        radar_lock_hit = True
+                        radar_lock_until = pygame.time.get_ticks() + 500
+
+            prev_rel_angle = rel_angle
 
         # draw wedge
         pts = [(ax, ay)]
@@ -3202,11 +3510,62 @@ while running:
         pygame.draw.polygon(screen, (0, 80, 0), pts)
         pygame.draw.polygon(screen, GREEN, pts, 2)
 
-        # sweep line
-        sweep_ang = -math.pi / 2 + radar_sweep * half_angle
-        lx = ax + math.cos(sweep_ang) * radius
-        ly = ay + math.sin(sweep_ang) * radius
-        pygame.draw.line(screen, (0, 255, 120), (ax, ay), (lx, ly), 2)
+        # sweep line / HMD box
+        if radar_locked:
+            # draw full cone outline
+            pts = [(psx, psy)]
+            segments = 12
+            for i in range(segments + 1):
+                ang = plane_angle - half_angle + (half_angle * 2 * (i / segments))
+                px = psx + math.cos(ang) * cone_range * camera_zoom
+                py = psy + math.sin(ang) * cone_range * camera_zoom
+                pts.append((px, py))
+            pygame.draw.polygon(screen, GREEN, pts, 2)
+            narrow_half = math.radians(7.5)
+            speed_factor = half_angle / narrow_half
+            fast_sweep = math.sin(pygame.time.get_ticks() * 0.003 * speed_factor)
+            cursor_ui_ang = -math.pi / 2 + radar_cursor_angle * half_angle
+            sweep_ang = cursor_ui_ang + fast_sweep * narrow_half
+
+            # locked area box on UI
+            cursor_ui_dist = 20 + radar_cursor_dist * (radius - 30)
+            ui_half_depth = cursor_ui_dist * 0.125
+            near_ui_dist = cursor_ui_dist - ui_half_depth
+            far_ui_dist = cursor_ui_dist + ui_half_depth
+            box_pts = []
+            left_ui_ang = cursor_ui_ang - narrow_half
+            right_ui_ang = cursor_ui_ang + narrow_half
+            for ang in (left_ui_ang, right_ui_ang):
+                px = ax + math.cos(ang) * near_ui_dist
+                py = ay + math.sin(ang) * near_ui_dist
+                box_pts.append((px, py))
+            for ang in (right_ui_ang, left_ui_ang):
+                px = ax + math.cos(ang) * far_ui_dist
+                py = ay + math.sin(ang) * far_ui_dist
+                box_pts.append((px, py))
+            pygame.draw.polygon(screen, GREEN, box_pts, 2)
+            cx = ax + math.cos(cursor_ui_ang) * cursor_ui_dist
+            cy = ay + math.sin(cursor_ui_ang) * cursor_ui_dist
+            s = 8
+            pygame.draw.rect(screen, GREEN, (cx - s, cy - s, s * 2, s * 2))
+            lx = ax + math.cos(sweep_ang) * radius
+            ly = ay + math.sin(sweep_ang) * radius
+            pygame.draw.line(screen, (0, 255, 120), (ax, ay), (lx, ly), 2)
+        elif radar_mode == "HMD":
+            radar_cursor_angle = hmd_cursor_angle
+            radar_cursor_dist = hmd_cursor_dist
+            if abs(hmd_rel_ang) < half_angle and hmd_mdist < cone_range:
+                hmd_ui_ang = -math.pi / 2 + radar_cursor_angle * half_angle
+                hmd_ui_dist = 20 + radar_cursor_dist * (radius - 30)
+                hcx = ax + math.cos(hmd_ui_ang) * hmd_ui_dist
+                hcy = ay + math.sin(hmd_ui_ang) * hmd_ui_dist
+                hs = 8
+                pygame.draw.rect(screen, GREEN, (hcx - hs, hcy - hs, hs * 2, hs * 2), 2)
+        else:
+            sweep_ang = -math.pi / 2 + radar_sweep * half_angle
+            lx = ax + math.cos(sweep_ang) * radius
+            ly = ay + math.sin(sweep_ang) * radius
+            pygame.draw.line(screen, (0, 255, 120), (ax, ay), (lx, ly), 2)
 
         # dots with fade
         now = pygame.time.get_ticks()
@@ -3214,8 +3573,8 @@ while running:
         for d in radar_dots:
             elapsed = now - d["time"]
             alpha = int(255 * (1.0 - elapsed / 1000))
-            dot_radius = 20 + (d["dist"] / cone_range) * (radius - 30)
-            dot_radius = min(radius - 10, max(20, dot_radius))
+            dot_frac = max(0.0, min(1.0, (d["dist"] - 500) / max(1, cone_range - 500)))
+            dot_radius = 20 + dot_frac * (radius - 30)
             dx = ax + math.cos(d["angle"]) * dot_radius
             dy = ay + math.sin(d["angle"]) * dot_radius
             dot_surf = pygame.Surface((16, 4), pygame.SRCALPHA)
@@ -3269,13 +3628,16 @@ while running:
 
             "",
 
-            "Z = TOGGLE 40MM BOFORS",
+            "R = SEARCH/HMD MODE",
+            "ALT+R = TOGGLE RADAR",
+            "ALT+F = TRACK (500MS)",
             "H = TOGGLE UI",
 
             "",
 
             f"AIRCRAFT: {aircraft_type}",
-            f"ACTIVE MISSILES: {len(missiles)}"
+            f"ACTIVE MISSILES: {len(missiles)}",
+            f"RADAR MODE: {radar_mode}"
         ]
 
         y = 20
@@ -3369,24 +3731,14 @@ while running:
             pygame.draw.rect(screen, health_color, (bar_x, bar_y, fill_w, bar_h))
 
     if result_text != "":
-        if result_text == "HIT":
-            txt = font.render(result_text, True, WHITE)
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 4))
-        else:
-            txt = big_font.render(
-                result_text,
-                True,
-                RED
-            )
-
-            screen.blit(
-                txt,
-                (
-                    WIDTH // 2
-                    - txt.get_width() // 2,
-                    HEIGHT // 2 - 40
-                )
-            )
+        txt = font.render(result_text, True, WHITE)
+        tx = WIDTH // 2 - txt.get_width() // 2
+        ty = HEIGHT // 4
+        if result_text == "TARGET DESTROYED":
+            outline = font.render(result_text, True, RED)
+            for dx, dy in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+                screen.blit(outline, (tx + dx, ty + dy))
+        screen.blit(txt, (tx, ty))
     pygame.display.flip()
 
 pygame.quit()
